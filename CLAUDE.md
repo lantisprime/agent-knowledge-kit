@@ -84,9 +84,20 @@ settled decisions (events-trigger/git-transports, multi-remote
 availability/authority/confidentiality split, fail-soft-for-consumers /
 fail-loud-for-operators), the event-propagation layer (`sync.sh listen`,
 post-sync hook trust contract), known gaps, and the ordered implementation
-plan from the 2026-07-28 adversarial review. Read it before extending the
-sync or adapter layer; the gaps listed there are tracked deliberately —
-don't "fix" them silently in passing.
+plan from two adversarial reviews (2026-07-28 and 2026-07-29). Read it
+before extending the sync or adapter layer; the gaps listed there are
+tracked deliberately — don't "fix" them silently in passing.
+
+**Do not treat the shipped code as hardened.** The second review's
+blocking findings are open: adapters read a *mutable, agent-writable*
+checkout, so commit signing secures transport and nothing secures
+delivery (`C1-b`); a corpus symlink exfiltrates arbitrary files through
+every adapter (`C2-b`); corpus text containing the Codex end marker
+escapes the managed block permanently (`H1-b`); `init` clones with no
+verification (`C3-b`); and host-clock sync age does not detect a freeze
+(`H2-b`). The plan order is **contain, then authenticate, then apply,
+then accelerate** — do not automate fleet-wide reapplication ahead of
+release authentication.
 
 ## Conventions
 
@@ -96,5 +107,8 @@ don't "fix" them silently in passing.
 - **Schema rules are load-bearing** (`schema/frontmatter.md`): one claim one
   home; supersede in place rather than publishing peers; kernel edits are
   PR-only and bounded by the token cap; `status: draft` never ships.
+  These are **policy, not enforcement** — nothing parses frontmatter or
+  counts tokens, and `kernel/kernel.template.md` itself carries
+  `status: draft` (`H5-b`, `L1-b`). Don't cite them as guarantees.
 - Docs are written for two audiences at once (operators and the agents
   reading them as context) — keep them terse and imperative.
