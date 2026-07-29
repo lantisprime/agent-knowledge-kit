@@ -8,7 +8,9 @@
 set -eu
 
 KNOWLEDGE_HOME="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
-KERNEL="$KNOWLEDGE_HOME/corpus/kernel/kernel.md"
+# nested (corpus repo keeps content under corpus/) or flat layout — try both
+KERNEL="$KNOWLEDGE_HOME/corpus/corpus/kernel/kernel.md"
+[ -f "$KERNEL" ] || KERNEL="$KNOWLEDGE_HOME/corpus/kernel/kernel.md"
 TARGET="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
 BEGIN='<!-- agent-knowledge-kit:begin (managed block, do not edit by hand) -->'
 END='<!-- agent-knowledge-kit:end -->'
