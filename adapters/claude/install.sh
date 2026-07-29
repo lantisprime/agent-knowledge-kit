@@ -15,12 +15,16 @@ mkdir -p "$KNOWLEDGE_HOME"
 cat > "$HOOK" <<'EOF'
 #!/bin/sh
 # SessionStart hook: emit the kernel; stdout becomes session context.
-KERNEL="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}/corpus/kernel/kernel.md"
-if [ -f "$KERNEL" ]; then
-    cat "$KERNEL"
-else
-    echo "WARNING: agent-knowledge kernel missing at $KERNEL — run sync.sh; operating without the environment contract."
-fi
+# The corpus repo may keep content under a corpus/ subdir (nested) or at the
+# repo root (flat) — try both.
+KH="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
+for KERNEL in "$KH/corpus/corpus/kernel/kernel.md" "$KH/corpus/kernel/kernel.md"; do
+    if [ -f "$KERNEL" ]; then
+        cat "$KERNEL"
+        exit 0
+    fi
+done
+echo "WARNING: agent-knowledge kernel missing under $KH/corpus — run sync.sh; operating without the environment contract."
 EOF
 chmod +x "$HOOK"
 
