@@ -7,8 +7,11 @@ pi needs no install script — it has two native paths:
 Add to every launch argv:
 
 ```sh
-pi --append-system-prompt "$HOME/.config/agent-knowledge/corpus/kernel/kernel.md" ...
+pi --append-system-prompt "$HOME/.config/agent-knowledge/corpus/corpus/kernel/kernel.md" ...
 ```
+
+(Nested `corpus/corpus/` because the corpus repo keeps content under a
+`corpus/` subdir; a flat-layout corpus would be `corpus/kernel/kernel.md`.)
 
 `--append-system-prompt` accepts a file path, is repeatable, and works with
 `--no-extensions`. If you orchestrate seats from a playbook that pins the
