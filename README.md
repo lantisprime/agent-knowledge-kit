@@ -101,6 +101,47 @@ do not treat this workflow as hardened deployment.
    the agent what your environment's rules are — the answer must come from
    context, with zero prompting and zero file reads.
 
+## Fixture-only publisher primitive
+
+`publisher/publish.sh` implements the local transaction portion of the
+accepted delivery boundary for authenticated test fixtures: publisher-owned
+logical roots, strict release identities, same-filesystem staging, immutable
+release bytes, an atomic `current` selector, serialized anti-rollback state,
+and a fail-loud integrity check. Its callable promotion verb is deliberately
+named `promote-fixture`; `promote` always fails with
+`authentication-unavailable`.
+
+The candidate must be a physical child of `<control-root>/quarantine/` with a
+`corpus/` directory and this deliberately test-only descriptor:
+
+```text
+agent-knowledge-kit-authenticated-test-fixture-v1
+sequence <1-18 digit nonzero decimal>
+digest <32-128 lowercase hexadecimal characters>
+```
+
+The descriptor asserts pre-authenticated test identity; it does not bind
+content cryptographically and must never be treated as the step-2 manifest.
+
+This is development infrastructure, not a production deployment interface.
+The real corpus manifest and signer policy belong to architecture step 2, the
+privileged macOS/Linux test still needs provisioned principals, and no shipped
+harness adapter reads the publication root. Therefore the mutable-checkout
+quickstart above remains the only working adapter path and remains unhardened.
+
+Portable verification is part of `sh tests/run.sh`. The privileged probe is:
+
+```sh
+sudo -n env \
+  AKK_TEST_PUBLISHER=<preprovisioned-publisher> \
+  AKK_TEST_AGENT=<preprovisioned-agent> \
+  AKK_TEST_SHARED_GROUP=<preprovisioned-shared-group> \
+  sh tests/publisher/two-principal.sh
+```
+
+The runner never creates accounts. Exit 77 means prerequisites were absent;
+it is not proof that the delivery boundary passed.
+
 ## Corpus layout
 
 ```

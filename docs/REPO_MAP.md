@@ -5,7 +5,8 @@
 >   entry points without importing assumptions from a consumer repository.
 > - **Authority:** navigation aid; `AGENTS.md`, `CLAUDE.md`, accepted plans,
 >   tests, schemas, and implementation remain the governing evidence.
-> - **Verified:** 2026-08-01 against Forgejo `main` at `6e93a56`.
+> - **Verified:** 2026-08-01 against a working tree based on Forgejo `main` at
+>   `c8f080b`.
 > - **Update trigger:** ownership, architecture, lifecycle, directory roles,
 >   supported adapters, verification entry points, or terminology changes.
 
@@ -58,14 +59,17 @@ kit's schemas, code, roadmap, tags, or releases.
 | `CLAUDE.md` | Implementation constraints, commands, and known gaps | Authoritative guidance |
 | `README.md` | Public concept, quickstart, and corpus contract | Shipped interface plus policy prose |
 | `docs/architecture.md` | Threat model, accepted decisions, gaps, and ordered plan | Target design; not all implemented |
-| `docs/plans/delivery-trust-boundary.md` | Accepted `C1-b` identities, publication, migration, and verification contract | Accepted design; implementation pending |
+| `docs/plans/delivery-trust-boundary.md` | Accepted `C1-b` identities, publication, migration, and verification contract | Accepted design; fixture transaction implemented, full boundary pending |
 | `adapters/sync.sh` | Clone, pull, and status prototype | Implemented, unhardened |
 | `adapters/lib/kernel-path.sh` | Shared kernel source validation | Implemented containment helper |
 | `adapters/claude/install.sh` | Claude SessionStart hook installer | Implemented, unhardened |
 | `adapters/codex/update-agents-md.sh` | Codex global managed-block updater | Implemented, unhardened |
 | `adapters/pi/run.sh` | Checked pi launcher | Implemented containment adapter |
 | `adapters/pi/README.md` | pi launch and discovery guidance | Public adapter instructions |
-| `tests/run.sh` | Portable C2-b/H1-b adapter regressions | Implemented narrow suite |
+| `publisher/publish.sh` | Fixture-only immutable publication transaction and integrity check | Implemented sub-slice; production promotion disabled |
+| `tests/run.sh` | Canonical portable adapter and publisher regressions | Implemented aggregate entry point |
+| `tests/publisher/run.sh` | Portable publication identity, state, failure, and concurrency regressions | Implemented fixture-only suite |
+| `tests/publisher/two-principal.sh` | Privileged macOS/Linux effective-access probe | Implemented runner; requires provisioned principals |
 | `kernel/kernel.template.md` | Shape of an environment Tier A kernel | Template; currently draft |
 | `schema/frontmatter.md` | Minimal corpus document schema | Prose contract; enforcement absent |
 | `LICENSE` | MIT license | Release/legal boundary |
@@ -98,9 +102,10 @@ remote corpus candidate
 ```
 
 The accepted `C1-b` decision requires distinct publisher and agent principals;
-it is not implemented by the current scripts. The kit supplies generic
-tooling. The consumer provisions the identities, protected absolute roots,
-scheduler, secret transport, monitoring, and deployment mechanism. The
+its fixture-only local transaction primitive is implemented, but protected
+harness delivery and complete platform evidence are not. The kit supplies
+generic tooling. The consumer provisions the identities, protected absolute
+roots, scheduler, secret transport, monitoring, and deployment mechanism. The
 private corpus supplies all environment content. Those layers may depend on a
 pinned kit release; the kit does not depend on their repositories.
 
@@ -117,13 +122,18 @@ pinned kit release; the kit does not depend on their repositories.
   read a kernel.
 - Whole-line managed-marker rejection before Codex touches its target.
 - Portable regression fixtures for the containment behaviors above.
+- A fixture-only publisher transaction with strict release identities,
+  same-filesystem staging, atomic selection, anti-rollback/equivocation state,
+  fail-closed local integrity, and portable failure/concurrency regressions.
+- An opt-in two-principal macOS/Linux runner that never creates accounts and
+  reports missing prerequisites as exit 77 rather than security success.
 - Markdown frontmatter and kernel templates.
 
 ### Required before hardened use
 
-- A distinct publisher principal, protected control/publication roots, atomic
-  immutable promotion, protected harness wiring, and real two-principal
-  negative tests as specified by the accepted delivery-boundary plan.
+- Recorded successful two-principal execution on supported macOS and Linux,
+  complete ancestor/effective-access and installed-code verification, safe
+  orphaned publication-lock recovery, and protected mandatory harness wiring.
 - Tests for the remaining URL, state, target-path, and draft failure modes.
 - Canonical-path and file-type containment for adapter targets.
 - Atomic, locked writes that preserve user-owned content or fail safely.
@@ -172,13 +182,18 @@ sh -n adapters/lib/kernel-path.sh
 sh -n adapters/claude/install.sh
 sh -n adapters/codex/update-agents-md.sh
 sh -n adapters/pi/run.sh
+sh -n publisher/publish.sh
 sh -n tests/run.sh
+sh -n tests/publisher/run.sh
+sh -n tests/publisher/two-principal.sh
 sh tests/run.sh
 ```
 
 Current manual happy-path checks are documented in `README.md`.
-`tests/run.sh` covers the `C2-b` source-containment and `H1-b`
-marker-injection gaps on the local platform. The full macOS/Linux adversarial
+`tests/run.sh` covers `C2-b` source containment, `H1-b` marker injection, and
+the fixture-only publication transaction on the local platform. Run
+`tests/publisher/two-principal.sh` only with its documented privileged
+fixtures; exit 77 is not pass evidence. The complete macOS/Linux adversarial
 matrix remains plan step 9.
 
 Documentation-only changes should at minimum run:

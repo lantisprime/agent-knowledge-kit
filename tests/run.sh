@@ -352,3 +352,8 @@ if [ "$failures" -ne 0 ]; then
     printf '%d test(s) failed\n' "$failures" >&2
     exit 1
 fi
+
+# Keep the fixture-only publication transaction in the canonical portable
+# verification command. It emits its own TAP document and fails this runner on
+# any publication regression.
+"$TEST_DIR/publisher/run.sh"
