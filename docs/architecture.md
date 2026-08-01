@@ -16,6 +16,24 @@ Finding IDs from the first review are bare (`C1`, `H3`); second-review
 IDs carry a `-b` suffix (`C1-b`, `H3-b`) — the two sets collide
 numerically and mean different things.
 
+## Authority and repository boundary
+
+This document is authoritative for the generic kit only because it lives and
+is reviewed in `agent-knowledge-kit`. The kit owns its architecture, schemas,
+adapters, tests, compatibility policy, and release lifecycle. External
+environment repositories may supply requirements and pin a released version,
+but they cannot define, tag, publish, or silently override the kit.
+
+Environment-specific hosts, deployment orchestration, monitoring, access
+paths, and private corpus content remain owned by the consumer. In
+particular, `home-network` is a consumer and integration owner, not the
+controller of this repository. Generic changes discovered there must be
+proposed and accepted here before they become part of the kit.
+
+The diagrams and ordered steps below include both current behavior and target
+design. Treat only behavior backed by the checked-in implementation, plus
+tests where present, as implemented; policy prose is not enforcement.
+
 ## System overview
 
 ```
@@ -250,6 +268,8 @@ Verdict **adopt-with-changes**; blocking before deployment or before
 enabling the event layer: `C1-b`–`C3-b`, `H1-b`–`H7-b`, `M1-b`, `M2-b`,
 `M9-b`. Three findings were independently reproduced in this repo before
 folding (marked ✅ below); the rest are accepted on the review's evidence.
+The `C2-b` and `H1-b` containment fixes landed with portable regressions on
+2026-08-01; the remaining findings retain their recorded status.
 
 **The reframing finding — `C1-b`: the verified git object is not the
 delivered artifact.** Signed commits and mTLS protect bytes in transit,
@@ -272,23 +292,22 @@ this repo is withdrawn.
 Remaining findings, condensed (full text and minimal fixes in the review
 artifact; each is carried into the plan or the gap list below):
 
-- **`C2-b` ✅ — a signed corpus exfiltrates arbitrary files by symlink.**
+- **`C2-b` ✅ resolved — a signed corpus exfiltrates arbitrary files by symlink.**
   Commit `kernel/kernel.md` as a symlink to `~/.ssh/id_rsa`; git
   preserves it, `[ -f "$KERNEL" ]` follows it, and the adapters emit the
   target into model context or persist it in global `AGENTS.md`. Signing
-  authenticates the malicious symlink rather than preventing it. This
-  doc anticipated exec bits (§hook trust contract) but not symlinked
-  *content*. Fix: reject git tree mode `120000` and every non-regular
-  file in an injected bundle; `lstat` + canonical-path containment
-  immediately before reading.
-- **`H1-b` ✅ — corpus content escapes the Codex managed block and
+  authenticates the malicious symlink rather than preventing it. The
+  containment helper now requires a regular, canonically contained file and,
+  for Git checkouts, a regular blob tree entry before an adapter reads it.
+- **`H1-b` ✅ resolved — corpus content escapes the Codex managed block and
   survives retraction.** A kernel containing the literal end marker
   makes `awk` close the block early, so the following corpus text is
   preserved as user-owned content forever. Reproduced: after two adapter
   runs the injected line was duplicated outside the block, and replacing
   the corpus with a clean kernel did not remove it. Fix: refuse either
   marker as a whole line in kernel content and exit without touching the
-  target; better, drop in-band delimiters for untrusted payloads.
+  target. The Codex adapter now rejects either marker as a whole line
+  before creating or changing its target.
 - **`C3-b` — `verify-commit FETCH_HEAD` does not authenticate a
   release.** `init` clones with no verification at all
   (`adapters/sync.sh:40`), and planned verification names no signer set,
@@ -434,17 +453,20 @@ before the observability and transport controls it leans on. The rule
 now is **contain, then authenticate, then apply, then accelerate**. Each
 step lands with its verify.
 
-0. **Containment patches (`C2-b`, `H1-b`)** — independent of everything
-   below and of the `C1-b` decision; both holes are reproducible today
-   and cost a few lines each. Every adapter `lstat`s the kernel, refuses
-   non-regular files (git tree mode `120000`), and checks canonical-path
-   containment before reading. `update-agents-md.sh` refuses to run when
-   either marker appears as a whole line in kernel content, exiting
-   non-zero without touching the target.
-   → verify: a symlinked `kernel.md` pointing outside the corpus is
-   refused by all three adapters with a logged reason and nothing is
-   emitted; a kernel containing the end marker leaves `AGENTS.md`
-   byte-identical and exits non-zero.
+0. **✅ Containment patches (`C2-b`, `H1-b`; implemented 2026-08-01)** —
+   independent of everything below and of the `C1-b` decision. A shared
+   validator requires a regular file and canonical-path containment before
+   the Claude, Codex, or checked pi adapter reads the kernel; Git checkouts
+   additionally require a regular blob tree entry. `update-agents-md.sh`
+   refuses to run when either marker appears as a whole line in kernel
+   content, exiting non-zero without touching the target. This does not solve
+   same-uid mutation or check/read races; those remain part of the step-1
+   delivery trust boundary.
+   → verify: `sh tests/run.sh` covers external and in-corpus kernel symlinks,
+   an escaping parent path, both whole-line markers, absent-target
+   preservation, a kernel without a final newline, idempotency, both corpus
+   layouts, non-Git delivery, and nested-first precedence across all three
+   adapters.
 1. **Delivery trust boundary — decide and record (`C1-b`)** — the
    blocking architectural fork; nothing downstream is meaningful until
    it is settled. Either (a) sync runs under a separate identity and
