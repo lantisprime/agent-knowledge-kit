@@ -1,6 +1,13 @@
 # Delivery trust boundary plan
 
-Status: **accepted design; implementation pending** (2026-08-01)
+Status: **accepted design; fixture transaction implemented, boundary pending**
+(2026-08-01)
+
+Implementation note: `publisher/publish.sh` and its portable regressions cover
+only the authenticated-test-fixture publication transaction. Production
+authentication, successful two-principal platform evidence, every-ancestor
+and installed-code proof, orphan-lock recovery, and mandatory harness wiring
+remain pending. This note does not alter the frozen requirements below.
 
 Decision: adopt the separate-identity, immutable-publication resolution for
 `C1-b`. Local agents are not fully trusted merely because they share an OS

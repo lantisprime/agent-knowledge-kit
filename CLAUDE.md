@@ -13,7 +13,8 @@ verification entry points, or canonical terminology changes.
 knowledge layer that pushes durable environment knowledge into AI agent
 context deterministically. It has no build system, no dependencies beyond
 `git` and POSIX `sh`, and no runtime of its own — the deliverables are a
-schema, a kernel template, one sync script, and one thin adapter per harness.
+schema, a kernel template, sync/publication primitives, and one thin adapter
+per harness.
 
 ## Self-governance boundary
 
@@ -42,7 +43,9 @@ system name here as a security regression, not a style issue.
 **Current prototype:** the corpus is cloned to `$KNOWLEDGE_HOME/corpus`
 (default `~/.config/agent-knowledge`) and is the only thing the shipped
 adapters read. `.episodic-memory/` is gitignored for the same reason: local
-memory references the operating environment.
+memory references the operating environment. `publisher/publish.sh` is a
+separate fixture-only transaction primitive; no adapter consumes its
+publications yet, and its production promotion verb is deliberately disabled.
 
 ## Architecture
 
@@ -89,19 +92,27 @@ the outages it documents. Preserve this behavior when editing.
 ./adapters/codex/update-agents-md.sh              # requires a synced kernel; run after each pull
 ./adapters/pi/run.sh [pi args...]                 # validates the kernel, then launches pi
 
-sh tests/run.sh                                   # C2-b/H1-b containment regressions
+./publisher/publish.sh prepare <control-root> <publication-root>
+./publisher/publish.sh promote-fixture <control-root> <publication-root> <candidate>
+./publisher/publish.sh check <control-root> <publication-root>
+
+sh tests/run.sh                                   # all portable regressions
+sh tests/publisher/two-principal.sh               # privileged; exit 77 without prerequisites
 shellcheck adapters/sync.sh adapters/lib/kernel-path.sh \
   adapters/claude/install.sh adapters/codex/update-agents-md.sh \
-  adapters/pi/run.sh tests/run.sh
+  adapters/pi/run.sh publisher/publish.sh tests/run.sh \
+  tests/publisher/run.sh tests/publisher/two-principal.sh
 ```
 
 Env overrides for testing: `KNOWLEDGE_HOME` (target dir), `KNOWLEDGE_REMOTES`
 (comma-separated remote list, overrides `$KNOWLEDGE_HOME/.remotes`),
 `CODEX_HOME`.
 
-`tests/run.sh` is a narrow portable regression suite for kernel-source
-containment and Codex managed-marker rejection. The full adversarial matrix
-and automated macOS/Linux execution remain open. The kit's end-to-end
+`tests/run.sh` runs the kernel-source/managed-marker regressions and the
+fixture-only publication transaction suite. The opt-in two-principal runner
+requires root plus pre-provisioned publisher, agent, and shared-group fixtures;
+exit 77 is a prerequisite skip, not C1-b evidence. Automated macOS/Linux
+execution and the broader adversarial matrix remain open. The kit's end-to-end
 verification loop is still README step 5: open a **fresh agent session** on a
 synced host and ask what the environment's rules are — the answer must come
 from context with zero prompting and zero file reads. Capability claims about
@@ -114,17 +125,20 @@ harnesses drift; prove them with the CLI, and record the check in a doc's
 settled decisions (including the separate-identity delivery trust boundary),
 the event-propagation layer (`sync.sh listen`, post-sync hook trust contract),
 known gaps, and the ordered implementation plan from two adversarial reviews
-(2026-07-28 and 2026-07-29). The accepted but unimplemented `C1-b` contract is
-frozen in `docs/plans/delivery-trust-boundary.md`. Read both before extending
+(2026-07-28 and 2026-07-29). The accepted `C1-b` contract is frozen in
+`docs/plans/delivery-trust-boundary.md`; only its fixture-only publication
+transaction sub-slice is implemented. Read both before extending
 the sync or adapter layer; the gaps listed there are tracked deliberately —
 don't "fix" them silently in passing.
 
 **Do not treat the shipped code as hardened.** The containment slice now
 rejects corpus symlinks and Codex marker injection (`C2-b`, `H1-b`), with
-portable regressions. The `C1-b` architectural fork is resolved in favor of a
-dedicated publisher principal and immutable publication, but its enforcement
-has not landed: adapters still read a *mutable, agent-writable* checkout, so
-commit signing secures transport and nothing secures delivery. `init` also
+portable regressions. The fixture-only publisher exercises immutable staging,
+atomic selection, anti-rollback state, strict local integrity, and a
+publication mutex, but production authentication, proven ancestor/effective
+access, orphan-lock recovery, and protected harness wiring have not landed.
+Adapters still read a *mutable, agent-writable* checkout, so commit signing
+secures transport and nothing yet secures end-to-end delivery. `init` also
 clones with no verification (`C3-b`), and host-clock sync age does not detect
 a freeze (`H2-b`). The plan order is **contain, then authenticate, then apply,
 then accelerate** — do not automate fleet-wide reapplication ahead of corpus
@@ -145,8 +159,11 @@ orchestration, monitoring, or private corpus content.
 ## Conventions
 
 - **POSIX `sh`, `set -eu`, git-only dependency.** No bash-isms, no jq, no
-  Python. If a task needs a real parser, print the fragment and let the
-  operator (or their agent) apply it — that is what `claude/install.sh` does.
+  Python. The publisher explicitly dispatches incompatible native macOS/Linux
+  `stat`, `find -perm`, `readlink -n`, and atomic symlink-replacement flags;
+  never replace that selector operation with plain `mv` onto `current`. If a
+  task needs a real parser, print the fragment and let the operator (or their
+  agent) apply it — that is what `claude/install.sh` does.
 - **Schema rules are load-bearing** (`schema/frontmatter.md`): one claim one
   home; supersede in place rather than publishing peers; kernel edits are
   PR-only and bounded by the token cap; `status: draft` never ships.

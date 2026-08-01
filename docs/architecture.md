@@ -53,7 +53,7 @@ tests where present, as implemented; policy prose is not enforcement.
                                                           │
                                                           ▼
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  HOST — ACCEPTED TARGET (publisher boundary not yet implemented)             ║
+║  HOST — ACCEPTED TARGET (fixture transaction only; boundary incomplete)      ║
 ║                                                                              ║
 ║  PUBLISHER PRINCIPAL                                                         ║
 ║   event fast-path (doorbell) ─┐                                              ║
@@ -108,8 +108,9 @@ authority is total, which drives the security decisions below.
   transport state and atomically exposes immutable, versioned releases
   through paths the agent principal cannot change. Protected adapter wiring,
   hooks, keys, state, locks, and selectors are part of the same boundary.
-  The decision is accepted; implementation is still pending. The frozen
-  contract is `docs/plans/delivery-trust-boundary.md`.
+  The decision is accepted; only its fixture-only transaction sub-slice is
+  implemented. The frozen contract is
+  `docs/plans/delivery-trust-boundary.md`.
 - **Fail-soft for consumers, fail-loud for operators.** `pull` keeps
   exiting 0 on unreachable remotes; `status` is the monitoring surface
   and must exit non-zero when stale.
@@ -139,7 +140,7 @@ authority is total, which drives the security decisions below.
   broker chain is a documented operator recipe, not kit code: the moment the
   kit ships a bridge it owns a network-facing security surface forever.
 
-## Delivery trust boundary — accepted target, not implemented
+## Delivery trust boundary — accepted target, partially prototyped
 
 The current prototype conflates transport, local state, publication, and
 consumption under the agent uid. The accepted target separates them:
@@ -181,10 +182,26 @@ physical version for the operation. Failure retains the last-good selector;
 local-integrity failure never falls back to the mutable checkout. Production
 publication remains gated on step 2 corpus release authentication.
 
+`publisher/publish.sh` now implements a fixture-only transaction core for
+strict test release identities: serialized promotion, same-filesystem staging,
+atomic macOS/Linux selector replacement, immutable published bytes,
+anti-rollback/equivocation state, narrow post-selector recovery, and fail-loud
+local integrity. `tests/publisher/run.sh` supplies portable regressions, and
+`tests/publisher/two-principal.sh` is an opt-in privileged probe that requires
+pre-provisioned identities. Production promotion remains unreachable.
+
+This does not complete the boundary. The current checkout has not produced
+real two-principal evidence; every-ancestor/effective-access and installed-code
+proof, safe orphan-lock recovery, production release authentication, and
+protected mandatory harness wiring remain pending. All shipped adapters still
+consume the mutable prototype checkout, so zero harnesses are advertised as
+hardened.
+
 `docs/plans/delivery-trust-boundary.md` is the accepted, falsifiable contract:
 it defines identities, logical roots, trust assumptions, migration, non-goals,
-and the required two-principal macOS/Linux tests. None of those protections
-are implemented by the checked-in scripts yet.
+and the required two-principal macOS/Linux tests. Treat the implemented
+fixture transaction as one bounded sub-slice, not enforcement of the full
+contract.
 
 ## Event layer — components
 
@@ -533,8 +550,9 @@ step lands with its verify.
    preservation, a kernel without a final newline, idempotency, both corpus
    layouts, non-Git delivery, and nested-first precedence across all three
    adapters.
-1. **Delivery trust boundary (`C1-b`) — accepted design; implementation
-   pending (2026-08-01).** Option (a) is selected: synchronization and
+1. **Delivery trust boundary (`C1-b`) — accepted design; fixture transaction
+   implemented, boundary pending (2026-08-01).** Option (a) is selected:
+   synchronization and
    publication run as a dedicated publisher principal; protected control
    state is never agent-readable where secret and never agent-writable; and
    adapters consume an atomically selected immutable version. Protected
@@ -542,7 +560,12 @@ step lands with its verify.
    hook/configuration replacement attack intact. The exact contract and
    bounded implementation slices are frozen in
    `docs/plans/delivery-trust-boundary.md`. Do not interpret the accepted
-   decision as enforcement by the current scripts.
+   decision or the fixture-only publisher as enforcement by current adapters.
+   The transaction sub-slice has portable identity, selector, state,
+   concurrency, signal, and corruption regressions. Its privileged runner was
+   not executable in this checkout because distinct provisioned principals and
+   non-interactive elevation are absent; orphan-lock recovery, protected
+   harness paths, and production authentication remain pending.
    → verify: under distinct real principals, the agent cannot edit, replace,
    redirect, or unlink the delivered kernel, active selector, control state,
    or mandatory harness wiring, nor bypass injection through direct invocation
