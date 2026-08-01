@@ -5,7 +5,7 @@
 >   entry points without importing assumptions from a consumer repository.
 > - **Authority:** navigation aid; `AGENTS.md`, `CLAUDE.md`, accepted plans,
 >   tests, schemas, and implementation remain the governing evidence.
-> - **Verified:** 2026-08-01 against Forgejo `main` at `b183b59`.
+> - **Verified:** 2026-08-01 against Forgejo `main` at `6e93a56`.
 > - **Update trigger:** ownership, architecture, lifecycle, directory roles,
 >   supported adapters, verification entry points, or terminology changes.
 
@@ -36,7 +36,8 @@ because they appear in a schema or design document.
 | Environment deployment and monitoring | Consumer repository |
 | Environment facts and procedures | Private corpus |
 
-The required ownership flow, once release authentication exists, is:
+The required ownership flow, once an authenticated kit release pipeline
+exists, is:
 
 ```text
 kit change -> tests/review in this repo -> Forgejo release
@@ -57,6 +58,7 @@ kit's schemas, code, roadmap, tags, or releases.
 | `CLAUDE.md` | Implementation constraints, commands, and known gaps | Authoritative guidance |
 | `README.md` | Public concept, quickstart, and corpus contract | Shipped interface plus policy prose |
 | `docs/architecture.md` | Threat model, accepted decisions, gaps, and ordered plan | Target design; not all implemented |
+| `docs/plans/delivery-trust-boundary.md` | Accepted `C1-b` identities, publication, migration, and verification contract | Accepted design; implementation pending |
 | `adapters/sync.sh` | Clone, pull, and status prototype | Implemented, unhardened |
 | `adapters/lib/kernel-path.sh` | Shared kernel source validation | Implemented containment helper |
 | `adapters/claude/install.sh` | Claude SessionStart hook installer | Implemented, unhardened |
@@ -69,8 +71,8 @@ kit's schemas, code, roadmap, tags, or releases.
 | `LICENSE` | MIT license | Release/legal boundary |
 
 There is currently no automated cross-platform test pipeline, authenticated
-release pipeline, schema version, or machine-enforced compatibility check.
-Adding those belongs here, not in a consumer repository.
+kit release pipeline, schema version, or machine-enforced compatibility
+check. Adding those belongs here, not in a consumer repository.
 
 ## 4. Runtime data flow
 
@@ -84,20 +86,23 @@ private corpus Git remote(s)
     -> Tier A kernel in a fresh agent context
 ```
 
-Target after delivery containment and authentication:
+Accepted target after delivery containment and corpus release authentication:
 
 ```text
-verified corpus release
-    -> immutable versioned publication
-    -> harness adapter
+remote corpus candidate
+    -> publisher-only control root/quarantine
+    -> authenticated corpus release
+    -> atomic immutable version under protected publication root
+    -> protected harness adapter/configuration
     -> Tier A kernel in a fresh agent context
 ```
 
-The kit supplies generic tooling. The consumer chooses the OS principal,
-absolute installation paths, scheduler, secret transport, monitoring, and
-deployment mechanism. The private corpus supplies all environment content.
-Those layers may depend on a pinned kit release; the kit does not depend on
-their repositories.
+The accepted `C1-b` decision requires distinct publisher and agent principals;
+it is not implemented by the current scripts. The kit supplies generic
+tooling. The consumer provisions the identities, protected absolute roots,
+scheduler, secret transport, monitoring, and deployment mechanism. The
+private corpus supplies all environment content. Those layers may depend on a
+pinned kit release; the kit does not depend on their repositories.
 
 ## 5. Current implementation versus target
 
@@ -116,30 +121,33 @@ their repositories.
 
 ### Required before hardened use
 
+- A distinct publisher principal, protected control/publication roots, atomic
+  immutable promotion, protected harness wiring, and real two-principal
+  negative tests as specified by the accepted delivery-boundary plan.
 - Tests for the remaining URL, state, target-path, and draft failure modes.
 - Canonical-path and file-type containment for adapter targets.
 - Atomic, locked writes that preserve user-owned content or fail safely.
 - Structured remote parsing, redacted logs, and restrictive state files.
 - One versioned corpus layout plus versioned frontmatter and routing schemas.
-- Verified bootstrap, authenticated immutable releases, anti-rollback, and
-  fail-loud operator status.
+- Verified bootstrap, authenticated immutable corpus releases, anti-rollback,
+  and fail-loud operator status.
 - Enforced draft exclusion and size limits; defined Tier B routing/loading.
 - Platform verification on supported macOS and Linux shells.
 
 Do not add fleet-wide hooks, listeners, or deployment automation ahead of
-the containment and release-authentication sequence.
+the containment and corpus-release-authentication sequence.
 
 ## 6. Change and release workflow
 
-Until this repository gains an authenticated release pipeline, development
-stops at a reviewed Forgejo merge:
+Until this repository gains an authenticated kit release pipeline,
+development stops at a reviewed Forgejo merge:
 
 ```text
 isolated branch/worktree -> reproduce with tests -> minimal fix
 -> local verification -> diff review -> Forgejo PR -> reviewed merge
 ```
 
-A tag must not be presented as a hardened release before release
+A tag must not be presented as a hardened kit release before kit release
 authentication lands. After that, Forgejo produces the release/tag and the
 consumer updates an explicit pin.
 
@@ -193,7 +201,12 @@ an authority; the verification command and this explanation also match.
 | Tier A / kernel | Small contract injected into every fresh agent session |
 | Tier B | Procedures selected for task-triggered context loading |
 | Tier C | Knowledge queried on demand |
-| publication | Validated local content exposed to adapters |
+| publisher principal | Consumer-provisioned identity, distinct from the agent principal, that alone may update control state and publications |
+| agent principal | Identity that runs the harness and may read, but never alter, a hardened corpus publication or its protected wiring |
+| control root | Publisher-only checkout, quarantine, state, locks, hooks, and trust policy |
+| publication root | Publisher-only same-filesystem staging, immutable version store, and atomic selector exposed read-only to the agent principal |
+| publication | Immutable versioned local content exposed read-only to the agent through an atomic selector |
 | adapter | Harness-specific mechanism that delivers Tier A knowledge into context |
-| release | Immutable, authenticated kit version produced from this repository |
+| kit release | Immutable, authenticated version of this repository that a consumer pins |
+| corpus release | Authenticated, versioned private-corpus publication selected on a consumer host |
 | pin | Consumer's explicit reference to a kit release/schema version |

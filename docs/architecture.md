@@ -53,18 +53,22 @@ tests where present, as implemented; policy prose is not enforcement.
                                                           │
                                                           ▼
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  HOST (identical on every machine)                                           ║
+║  HOST — ACCEPTED TARGET (publisher boundary not yet implemented)             ║
 ║                                                                              ║
+║  PUBLISHER PRINCIPAL                                                         ║
 ║   event fast-path (doorbell) ─┐                                              ║
-║   cron floor ─────────────────┼──▶ sync.sh pull   (ff-only, fail-soft)       ║
-║                               │        │ on success, HEAD ≠ applied-marker   ║
-║                               │        ▼                                     ║
-║                               │   hooks/post-sync/*  (operator-installed)    ║
-║                               │        │                                     ║
-║   $KNOWLEDGE_HOME/corpus/kernel/kernel.md ◀── the ONE path adapters resolve  ║
-║        ├─▶ claude: SessionStart hook  ──▶ Claude Code                        ║
-║        ├─▶ codex:  managed AGENTS.md block ──▶ Codex CLI                     ║
-║        └─▶ pi:     --append-system-prompt ──▶ pi                             ║
+║   cron floor ─────────────────┼──▶ sync + corpus-release authentication      ║
+║                               │        │                                      ║
+║                               │        ▼                                      ║
+║                               │   protected control root                      ║
+║                               │   state · locks · hooks · trust               ║
+║                               │        │ atomic publish                       ║
+║                               │        ▼                                      ║
+║  AGENT PRINCIPAL              │   protected publication root                 ║
+║   protected harness integration ◀── current/corpus/kernel/kernel.md           ║
+║        ├─▶ Claude Code                                                       ║
+║        ├─▶ Codex CLI                                                         ║
+║        └─▶ pi                                                                ║
 ╚═════════════════════════════════════════╤════════════════════════════════════╝
                                           ▼
               ┌────────────────────────────────────────────────────┐
@@ -75,10 +79,12 @@ tests where present, as implemented; policy prose is not enforcement.
               └────────────────────────────────────────────────────┘
 ```
 
-The kernel path is the entire integration contract: everything upstream
-exists to place one file at one path; every adapter is a thin reader of
-it. That is why adding a harness is trivial — and why corpus authority is
-total, which drives the security decisions below.
+One canonically contained kernel path within the selected physical corpus
+release remains the content contract: everything upstream exists to publish
+that file, and every adapter is a thin protected reader of it. The shipped
+prototype instead reads mutable `$KNOWLEDGE_HOME/corpus` under the agent uid;
+the accepted target above is not enforcement by the current code. Corpus
+authority is total, which drives the security decisions below.
 
 ## Settled design decisions
 
@@ -90,20 +96,28 @@ total, which drives the security decisions below.
   convergence.
 - **Multi-remote decouples three concerns.** *Availability*: the ordered
   remote list (canonical first, mirrors after) — implemented.
-  *Authority*: every remote can currently rewrite the kernel; the fix is
-  signed commits verified before `merge --ff-only`, failing soft to the
-  next remote — mirrors can then withhold updates but not author them.
+  *Authority*: every remote can currently rewrite the kernel; the step-2
+  target pins repository/ref/signer policy and authenticates a monotonic
+  corpus release manifest before publication, failing soft to the next remote
+  — mirrors can then withhold updates but not author accepted releases.
   *Confidentiality*: the kit mirrors publicly by design; a **corpus**
   must not be mirrored outside its trust boundary without an explicit,
   recorded decision (don't mirror / encrypt at rest / accept custody).
+- **Local delivery crosses a protected publisher boundary.** The `C1-b`
+  resolution is option (a): a dedicated publisher principal owns mutable
+  transport state and atomically exposes immutable, versioned releases
+  through paths the agent principal cannot change. Protected adapter wiring,
+  hooks, keys, state, locks, and selectors are part of the same boundary.
+  The decision is accepted; implementation is still pending. The frozen
+  contract is `docs/plans/delivery-trust-boundary.md`.
 - **Fail-soft for consumers, fail-loud for operators.** `pull` keeps
   exiting 0 on unreachable remotes; `status` is the monitoring surface
   and must exit non-zero when stale.
 - **Doorbell semantics.** An event means only "pull now". Because the
-  consumer converges to git HEAD regardless of message content, ordering,
-  dedup, replay, and exactly-once are non-requirements: at-least-once +
-  idempotent `git pull --ff-only` gives correctness; events only buy
-  latency.
+  ordinary path authenticates and selects the newest acceptable corpus
+  release independently of message content, ordering, dedup, replay, and
+  exactly-once are non-requirements. At-least-once plus serialized,
+  idempotent convergence gives correctness; events only buy latency.
 - **Producer side.** Events come only from the canonical remote's
   post-receive webhook; mirrors never produce events (they lag, and
   authority stays with canonical). Preferred broker where one is wanted:
@@ -120,11 +134,57 @@ total, which drives the security decisions below.
   fail-silent: agents run an arbitrarily old kernel while the operator
   view says healthy. Stale safety rules are worse than absent ones; the
   fail-loud channel must not ride a transport the attacker can own.
-- **Scope (review L2).** The kit ships `listen`, the post-sync hook
-  runner, and the cron floor — no network code. The webhook → bridge →
-  broker chain is a documented operator recipe, not kit code: the moment
-  the kit ships a bridge it owns a network-facing security surface
-  forever.
+- **Scope (review L2).** Planned kit scope includes `listen`, the post-sync
+  hook runner, and the cron floor — no network code. The webhook → bridge →
+  broker chain is a documented operator recipe, not kit code: the moment the
+  kit ships a bridge it owns a network-facing security surface forever.
+
+## Delivery trust boundary — accepted target, not implemented
+
+The current prototype conflates transport, local state, publication, and
+consumption under the agent uid. The accepted target separates them:
+
+```text
+publisher principal
+┌────────────────────────────────────┐
+│ protected control root             │
+│ checkout · quarantine · state      │
+│ locks · hooks · trust policy       │
+└─────────────────┬──────────────────┘
+                  │ atomic publish
+                  ▼
+┌────────────────────────────────────┐
+│ protected publication root         │
+│ staging · immutable releases       │
+│ atomic current selector            │
+└─────────────────┬──────────────────┘
+                  │ resolve once; read physical release
+                  ▼
+agent principal
+┌────────────────────────────────────┐
+│ harness cannot rewrite publication │
+└────────────────────────────────────┘
+```
+
+Protection applies to the whole delivery path, not only kernel bytes. The
+publisher principal must differ from the agent principal; every relevant
+ancestor, selector, release, launcher, and harness configuration must resist
+agent-principal replacement through modes, groups, ACLs, or symlinks. A
+harness without a demonstrably protected injection point remains
+prototype-only. Environment-selected paths such as `KNOWLEDGE_HOME` remain a
+prototype/test interface, not hardened configuration authority.
+
+Promotion creates and validates a same-filesystem staged release, makes it
+non-agent-writable, renames it into a never-mutated version directory, and
+atomically replaces `current`. Readers resolve `current` once and use that
+physical version for the operation. Failure retains the last-good selector;
+local-integrity failure never falls back to the mutable checkout. Production
+publication remains gated on step 2 corpus release authentication.
+
+`docs/plans/delivery-trust-boundary.md` is the accepted, falsifiable contract:
+it defines identities, logical roots, trust assumptions, migration, non-goals,
+and the required two-principal macOS/Linux tests. None of those protections
+are implemented by the checked-in scripts yet.
 
 ## Event layer — components
 
@@ -163,11 +223,14 @@ Requirements (review M1/M2/M4):
   touches a heartbeat file so `status` can report listener liveness. The
   cron floor is mandatory even where `listen` runs.
 
-### Post-sync hooks — `$KNOWLEDGE_HOME/hooks/post-sync/*`
+### Post-sync hooks — `<control-root>/hooks/post-sync/*`
 
-Run by `pull` so downstream consumers re-apply the kernel (first user:
-the Codex adapter, whose `~/.codex/AGENTS.md` snapshot currently freezes
-because nothing re-runs it).
+Run by `pull` as the publisher principal so downstream consumers re-apply the
+kernel. The historical first user was the Codex adapter, whose agent-writable
+`~/.codex/AGENTS.md` snapshot currently freezes because nothing re-runs it;
+that target remains prototype-only and cannot satisfy hardened step 1. A
+protected Codex injection point still must be proven. `<control-root>` is the
+publisher-only root defined by the accepted delivery-boundary plan.
 
 **Trust contract (review C1 — the design's only code-execution story;
 non-negotiable):**
@@ -178,20 +241,20 @@ non-negotiable):**
   exec bits; "the corpus is only markdown" is not a property git
   enforces).
 - At execution time: skip symlinks; require regular files owned by the
-  euid running pull; require the hooks dir itself to be a real,
-  non-group/other-writable directory.
-- Hooks run with a scrubbed minimal environment — an explicit allowlist
-  (at minimum `PATH`, `HOME`, `KNOWLEDGE_HOME`; a scrub that drops
-  `KNOWLEDGE_HOME` breaks the hooks the runner exists to run) — and
-  receive exactly `<old-sha> <new-sha>` as argv, nothing else.
+  publisher principal; require the hook file and every parent path component
+  to be protected from agent-principal writes; execute a protected copy to
+  close the check/execute race.
+- Hooks run with a scrubbed minimal environment, a fixed system `PATH`, and
+  path/configuration values loaded only from publisher-owned configuration.
+  Do not inherit caller-controlled `HOME`, `KNOWLEDGE_HOME`, or `PATH` as
+  authority. Hooks receive exactly `<old-sha> <new-sha>` as argv.
 
 **Trigger invariant (review H3):** not "SHA changed" but
 "**HEAD ≠ applied-marker**". `pull` runs the hook batch whenever HEAD
-differs from `$KNOWLEDGE_HOME/.hooks-applied`, and writes the marker only
-after *all* hooks succeed. Otherwise a crash mid-batch on a low-churn
-corpus freezes downstream consumers until the next commit — the
-frozen-Codex bug resurrected in a smaller window. Hooks must therefore be
-idempotent.
+differs from `<control-root>/state/hooks-applied`, and writes the marker only
+after *all* hooks succeed. Otherwise a crash mid-batch on a low-churn corpus
+freezes downstream consumers until the next commit — the frozen-Codex bug
+resurrected in a smaller window. Hooks must therefore be idempotent.
 
 **Failure semantics (review H4):** hook failure never fails the pull
 (fail-soft for consumers), but is recorded in the state file
@@ -213,19 +276,20 @@ correct). Hooks run inside the same critical section.
 
 ### Ordering constraint (review H1)
 
-Signed-commit verification lands **before or with** `listen`. Events
+Corpus release authentication lands **before or with** `listen`. Events
 collapse the forged-kernel detection window from cron cadence (minutes–
 hours; an operator can catch it) to seconds, and the kernel is the most
-leverage-dense injection surface in the architecture. If verification
+leverage-dense injection surface in the architecture. If authentication
 slips, `listen` ships disabled-by-default with that dependency documented.
 
 ### Transport & telemetry trust (MITM hardening, 2026-07-29)
 
-A network MITM cannot inject content (signed commits), trigger execution
-(hook contract), or redirect a fetch (hint checked, never consumed) — but
-unhardened, it can make a *freeze invisible* via the composite attack in
-the settled-decisions bullet above. Three defenses, protecting two
-different parties:
+In the accepted target, a network MITM cannot inject a published corpus
+release (step-2 repository/ref/signer policy, manifest identity, and
+anti-rollback), trigger execution (hook contract), or redirect a fetch (hint
+checked, never consumed). Before those controls land, it can also make a
+*freeze invisible* via the composite attack in the settled-decisions bullet
+above. Three defenses protect two different parties:
 
 1. **mTLS on the broker path, both directions.** Subscriber-side MITM is
    the doorbell-forgery/suppression attack; publisher-side MITM is the
@@ -259,7 +323,7 @@ different parties:
    release currency*: compare a monotonic signed release sequence
    against an authoritative target, detect clock regression and future
    timestamps, and fail visibly when neither currency nor sane time can
-   be established (plan step 6). Until that lands, the MITM amendment's
+   be established (plan step 5). Until that lands, the MITM amendment's
    agent-facing defense is aspirational — defenses 1 and 2 stand.
 
 ## Second adversarial review (Codex gpt-5.6-sol, 2026-07-29)
@@ -282,12 +346,14 @@ Claude hook and gain execution at next session start. The planned
 `owner == euid` hook check is no defense — attacker and updater share
 that euid. This invalidates the "corpus authority is total, therefore
 sign it" chain in §System overview: signing secures *transport*, and
-nothing currently secures *delivery*. Resolution is binary and must be
-recorded: either sync runs under a separate identity that atomically
-publishes an immutable versioned artifact adapters read (hooks, keys,
-state, and markers outside agent-writable paths), or local agents are
-explicitly declared fully trusted and every local-integrity claim in
-this repo is withdrawn.
+nothing currently secures *delivery*. The required choice was binary: either
+sync runs under a separate identity that atomically publishes an immutable
+versioned artifact adapters read (hooks, keys, state, and markers outside
+agent-writable paths), or local agents are explicitly declared fully trusted
+and every local-integrity claim in this repo is withdrawn. **Decision
+(2026-08-01): option (a) is accepted.** The frozen contract is
+`docs/plans/delivery-trust-boundary.md`; no delivery-boundary implementation
+has landed, so the vulnerability remains in the current prototype.
 
 Remaining findings, condensed (full text and minimal fixes in the review
 artifact; each is carried into the plan or the gap list below):
@@ -406,7 +472,7 @@ artifact; each is carried into the plan or the gap list below):
   `ok pull <mirror> <old-sha>` — "ok" while behind by exactly the commit
   that rang the bell. Mitigate: try last-successful remote first (full
   ordered list as fallback) + the SHA hint's `behind` state. Deferral
-  premises: this stays deferred only while plan step 4 ships the
+  premises: this stays deferred only while plan step 7 ships the
   min-pull-interval and SHA hint and step 5 makes `status` surface
   `behind` — descope any of those and M3 re-opens as blocking (without
   them, mirror-only hosts return to silent divergence).
@@ -467,22 +533,28 @@ step lands with its verify.
    preservation, a kernel without a final newline, idempotency, both corpus
    layouts, non-Git delivery, and nested-first precedence across all three
    adapters.
-1. **Delivery trust boundary — decide and record (`C1-b`)** — the
-   blocking architectural fork; nothing downstream is meaningful until
-   it is settled. Either (a) sync runs under a separate identity and
-   atomically publishes an immutable versioned artifact that adapters
-   read, with hooks, signing keys, state, and applied markers outside
-   agent-writable paths; or (b) local agents are declared fully trusted,
-   recorded here as an accepted risk, and every local-integrity claim in
-   README/CLAUDE.md/this doc is withdrawn — signing then buys transport
-   integrity only.
-   → verify: with the decision applied, an in-place edit of the
-   delivered kernel by the agent uid is either impossible (a) or
-   documented as in-scope-for-the-threat-model (b); no doc claims
-   otherwise.
-2. **Verified bootstrap + release authentication (`C3-b`, old H1)** —
+1. **Delivery trust boundary (`C1-b`) — accepted design; implementation
+   pending (2026-08-01).** Option (a) is selected: synchronization and
+   publication run as a dedicated publisher principal; protected control
+   state is never agent-readable where secret and never agent-writable; and
+   adapters consume an atomically selected immutable version. Protected
+   harness wiring is in scope — securing only the corpus would leave the
+   hook/configuration replacement attack intact. The exact contract and
+   bounded implementation slices are frozen in
+   `docs/plans/delivery-trust-boundary.md`. Do not interpret the accepted
+   decision as enforcement by the current scripts.
+   → verify: under distinct real principals, the agent cannot edit, replace,
+   redirect, or unlink the delivered kernel, active selector, control state,
+   or mandatory harness wiring, nor bypass injection through direct invocation
+   or alternate configuration; a dedicated publisher mutex prevents
+   concurrent rollback and selector/state disagreement; selector grammar and
+   canonical containment are enforced; unsafe modes/groups/ACLs/ancestors
+   fail; local-integrity failure never falls back to the mutable checkout; and
+   captured injected bytes match one physical published version on supported
+   macOS and Linux configurations.
+2. **Verified bootstrap + corpus release authentication (`C3-b`, old H1)** —
    pin repository identity, ref, and authorized signer or CI attestor;
-   publish a signed release manifest carrying full commit and tree
+   publish a signed corpus release manifest carrying full commit and tree
    hashes plus a monotonic version; verify in quarantine *before*
    exposing content, on `init` and `pull` alike (`fetch` +
    `verify-commit FETCH_HEAD` + `merge --ff-only`, failing soft to the
@@ -496,13 +568,18 @@ step lands with its verify.
    All target writes create their temp file **in the target directory**
    — not `/tmp`, whose cross-device rename degrades to a non-atomic
    copy — validate complete content, preserve modes, then `mv`. Same
-   discipline for state and marker files, with bounded state history and
-   explicit read-only / ENOSPC handling.
-   → verify: two concurrent `pull`s on one `KNOWLEDGE_HOME` — one
+   discipline for state and marker files, with bounded state history,
+   explicit read-only / ENOSPC handling, plus an explicit power-loss
+   durability disposition per supported platform. POSIX rename alone proves
+   atomic visibility; step 3 must prove an allowed sync primitive, approve a
+   dependency/compatibility change, or narrow the guarantee and record the
+   residual risk before hardened cutover.
+   → verify: two concurrent `pull`s on one protected control root — one
    converges, one no-ops, state never says `stale`; a reader loop during
    repeated adapter runs never observes a truncated managed block;
-   `KNOWLEDGE_HOME` on a different filesystem than the target still
-   renames atomically; a full disk fails without destroying the target.
+   a protected control root and adapter target on different filesystems still
+   use target-local atomic renames; a full disk fails without destroying the
+   target.
 4. **Hook trust contract + runner (old C1/H3/H4, `H4-b`)** — `pull`
    gains the post-sync runner inside the step-3 critical section:
    applied-SHA marker (trigger on **HEAD ≠ marker**, not "SHA changed"),
@@ -511,21 +588,20 @@ step lands with its verify.
    *file* and every parent path component — the old contract checked
    only the directory, contradicting its own verify criterion — with a
    fixed system `PATH` (not the caller's), rejection of unexpected file
-   types, and the hooks directory outside agent-writable
-   `KNOWLEDGE_HOME`. Execute a protected copy to avoid the
-   check-then-execute race.
+   types, and hooks under the publisher-only control root. Execute a protected
+   copy to avoid the check-then-execute race.
    → verify: hook fires when marker ≠ HEAD even with an unchanged
    remote; symlinked, group-writable, and wrong-owner hooks are each
    skipped with a logged reason, as is a hook under a group-writable
    parent; `kill -9` mid-batch → next pull re-runs the batch; a hook
    inheriting a poisoned `PATH` still resolves system binaries.
-5. **Fail-loud status + release currency (`M1-b`, `H2-b`, old M3)** —
+5. **Fail-loud status + corpus release currency (`M1-b`, `H2-b`, old M3)** —
    record *typed* failure reasons (unreachable / auth / divergent /
    locked / corrupt / policy-rejected) and full commit+tree hashes, not
    an abbreviated SHA; always retain last-good SHA and timestamp;
    `status` exits non-zero on stale, behind, never-synced, and
    hooks-failed. Separate **last transport success** from **verified
-   release currency**: compare the monotonic signed release sequence
+   corpus release currency**: compare the monotonic signed release sequence
    from step 2 against the authoritative target, and detect clock
    regression and future timestamps. The kernel provenance banner
    (`corpus <sha> · release <n> · synced <age>`) escalates to a loud

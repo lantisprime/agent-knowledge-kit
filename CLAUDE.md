@@ -39,10 +39,10 @@ Those belong in a separate *private corpus repo* per environment, written
 against `schema/frontmatter.md`. Treat any change that would introduce a real
 system name here as a security regression, not a style issue.
 
-The corpus is cloned to `$KNOWLEDGE_HOME/corpus` (default
-`~/.config/agent-knowledge`) and is the only thing the adapters read.
-`.episodic-memory/` is gitignored for the same reason: local memory
-references the operating environment.
+**Current prototype:** the corpus is cloned to `$KNOWLEDGE_HOME/corpus`
+(default `~/.config/agent-knowledge`) and is the only thing the shipped
+adapters read. `.episodic-memory/` is gitignored for the same reason: local
+memory references the operating environment.
 
 ## Architecture
 
@@ -57,8 +57,8 @@ Three delivery tiers, which every file here serves:
 - **Tier B** — full procedure docs, loaded on trigger (`triggers:` frontmatter).
 - **Tier C** — query-on-demand tooling; Tier A pointers make it discoverable.
 
-**The adapter contract** (`adapters/`): every code-backed adapter validates
-and resolves a regular, canonically contained kernel below
+**The current prototype adapter contract** (`adapters/`): every code-backed
+adapter validates and resolves a regular, canonically contained kernel below
 `${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}/corpus`, supporting the
 current nested and flat corpus layouts. The Claude and Codex adapters are
 re-runnable after each sync; the pi adapter validates at launch. They differ
@@ -111,23 +111,30 @@ harnesses drift; prove them with the CLI, and record the check in a doc's
 ## Design decisions & plan
 
 `docs/architecture.md` is the authoritative design record: system diagram,
-settled decisions (events-trigger/git-transports, multi-remote
-availability/authority/confidentiality split, fail-soft-for-consumers /
-fail-loud-for-operators), the event-propagation layer (`sync.sh listen`,
-post-sync hook trust contract), known gaps, and the ordered implementation
-plan from two adversarial reviews (2026-07-28 and 2026-07-29). Read it
-before extending the sync or adapter layer; the gaps listed there are
-tracked deliberately — don't "fix" them silently in passing.
+settled decisions (including the separate-identity delivery trust boundary),
+the event-propagation layer (`sync.sh listen`, post-sync hook trust contract),
+known gaps, and the ordered implementation plan from two adversarial reviews
+(2026-07-28 and 2026-07-29). The accepted but unimplemented `C1-b` contract is
+frozen in `docs/plans/delivery-trust-boundary.md`. Read both before extending
+the sync or adapter layer; the gaps listed there are tracked deliberately —
+don't "fix" them silently in passing.
 
 **Do not treat the shipped code as hardened.** The containment slice now
 rejects corpus symlinks and Codex marker injection (`C2-b`, `H1-b`), with
-portable regressions. The remaining blocking findings are open: adapters
-still read a *mutable, agent-writable* checkout, so commit signing secures
-transport and nothing secures delivery (`C1-b`); `init` clones with no
-verification (`C3-b`); and host-clock sync age does not detect a freeze
-(`H2-b`). The plan order is **contain, then authenticate, then apply, then
-accelerate** — do not automate fleet-wide reapplication ahead of release
-authentication.
+portable regressions. The `C1-b` architectural fork is resolved in favor of a
+dedicated publisher principal and immutable publication, but its enforcement
+has not landed: adapters still read a *mutable, agent-writable* checkout, so
+commit signing secures transport and nothing secures delivery. `init` also
+clones with no verification (`C3-b`), and host-clock sync age does not detect
+a freeze (`H2-b`). The plan order is **contain, then authenticate, then apply,
+then accelerate** — do not automate fleet-wide reapplication ahead of corpus
+release authentication.
+
+For delivery-boundary work, same-uid ownership checks, agent-controlled path
+overrides, or protecting corpus bytes while leaving launcher/harness
+configuration writable do not satisfy step 1. Follow the two-principal
+negative tests in the accepted plan and keep prototype fallbacks out of
+hardened mode.
 
 Its authority is scoped to this repository. External designs, including
 environment integration ADRs, are requirements or historical input only. A

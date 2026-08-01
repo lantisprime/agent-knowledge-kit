@@ -1,1 +1,4 @@
 .episodic-memory/
+
+# Local episodic-memory install metadata
+/.episodic-memory-install.json
