@@ -10,22 +10,32 @@ set -eu
 
 KNOWLEDGE_HOME="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
 HOOK="$KNOWLEDGE_HOME/claude-kernel-hook.sh"
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+KERNEL_LIB="$SCRIPT_DIR/../lib/kernel-path.sh"
+
+[ -f "$KERNEL_LIB" ] || { echo "kernel validator missing at $KERNEL_LIB" >&2; exit 1; }
 
 mkdir -p "$KNOWLEDGE_HOME"
-cat > "$HOOK" <<'EOF'
+{
+cat <<'EOF'
 #!/bin/sh
 # SessionStart hook: emit the kernel; stdout becomes session context.
-# The corpus repo may keep content under a corpus/ subdir (nested) or at the
-# repo root (flat) — try both.
-KH="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
-for KERNEL in "$KH/corpus/corpus/kernel/kernel.md" "$KH/corpus/kernel/kernel.md"; do
-    if [ -f "$KERNEL" ]; then
-        cat "$KERNEL"
-        exit 0
-    fi
-done
-echo "WARNING: agent-knowledge kernel missing under $KH/corpus — run sync.sh; operating without the environment contract."
 EOF
+cat "$KERNEL_LIB"
+cat <<'EOF'
+KH="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
+if KERNEL=$(akk_resolve_kernel "$KH"); then
+    cat "$KERNEL"
+    exit 0
+else
+    resolve_rc=$?
+    if [ "$resolve_rc" -eq 2 ]; then
+        echo "WARNING: agent-knowledge kernel missing under $KH/corpus — run sync.sh; operating without the environment contract."
+    fi
+    exit 0
+fi
+EOF
+} > "$HOOK"
 chmod +x "$HOOK"
 
 cat <<EOF

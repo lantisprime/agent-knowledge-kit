@@ -8,14 +8,28 @@
 set -eu
 
 KNOWLEDGE_HOME="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
-# nested (corpus repo keeps content under corpus/) or flat layout — try both
-KERNEL="$KNOWLEDGE_HOME/corpus/corpus/kernel/kernel.md"
-[ -f "$KERNEL" ] || KERNEL="$KNOWLEDGE_HOME/corpus/kernel/kernel.md"
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+# shellcheck source=../lib/kernel-path.sh
+. "$SCRIPT_DIR/../lib/kernel-path.sh"
 TARGET="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
 BEGIN='<!-- agent-knowledge-kit:begin (managed block, do not edit by hand) -->'
 END='<!-- agent-knowledge-kit:end -->'
 
-[ -f "$KERNEL" ] || { echo "kernel missing at $KERNEL — run sync.sh first" >&2; exit 1; }
+if KERNEL=$(akk_resolve_kernel "$KNOWLEDGE_HOME"); then
+    :
+else
+    resolve_rc=$?
+    if [ "$resolve_rc" -eq 2 ]; then
+        echo "kernel missing under $KNOWLEDGE_HOME/corpus — run sync.sh first" >&2
+    fi
+    exit 1
+fi
+
+if grep -F -x -q "$BEGIN" "$KERNEL" || grep -F -x -q "$END" "$KERNEL"; then
+    echo "refusing kernel: content contains an agent-knowledge-kit managed marker" >&2
+    exit 1
+fi
+
 mkdir -p "$(dirname "$TARGET")"
 touch "$TARGET"
 
@@ -30,6 +44,8 @@ awk -v b="$BEGIN" -v e="$END" '
     cat "$tmp"
     echo "$BEGIN"
     cat "$KERNEL"
+    # Keep the delimiter structural even when the kernel has no final newline.
+    echo
     echo "$END"
 } > "$TARGET"
 rm -f "$tmp"

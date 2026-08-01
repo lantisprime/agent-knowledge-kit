@@ -1,22 +1,24 @@
 # pi Tier A adapter
 
-pi needs no install script — it has two native paths:
+pi has a checked launcher plus native context-file discovery:
 
-## 1. Deterministic per-session injection (recommended for driven seats)
+## 1. Checked deterministic injection (recommended)
 
-Add to every launch argv:
+Launch pi through the kit adapter:
 
 ```sh
-pi --append-system-prompt "$HOME/.config/agent-knowledge/corpus/corpus/kernel/kernel.md" ...
+adapters/pi/run.sh ...
 ```
 
-(Nested `corpus/corpus/` because the corpus repo keeps content under a
-`corpus/` subdir; a flat-layout corpus would be `corpus/kernel/kernel.md`.)
+The launcher honors `KNOWLEDGE_HOME`, resolves the supported nested or flat
+layout, refuses symbolic links and paths that escape the corpus checkout, and
+then runs `pi --append-system-prompt <validated-kernel> ...`. Do not point pi
+directly at the mutable corpus path; that bypasses source containment.
 
 `--append-system-prompt` accepts a file path, is repeatable, and works with
 `--no-extensions`. If you orchestrate seats from a playbook that pins the
-argv, add the flag there — the argv is itself procedural memory; version the
-change.
+argv, invoke the checked launcher there — the argv is itself procedural
+memory; version the change.
 
 ## 2. Repo-level auto-discovery
 

@@ -40,6 +40,23 @@ answer with confidence. The fix is **push-first**:
   kernel and docs, written against the kit's schema. Access paths, hostnames,
   and internal topology belong there — never in a public repo.
 
+## Governance and consumption
+
+The kit governs and releases itself from this repository. Its architecture,
+schemas, adapters, tests, compatibility policy, and release tags are not
+owned by any environment repository. A consumer may propose a change, but a
+generic change is reviewed and released here before the consumer adopts it.
+
+Consumers own environment integration: they pin an immutable kit release,
+deploy its adapters, validate their private corpus against the pinned schema,
+and monitor convergence. The dependency is one-way: kit release → consumer
+pin → private corpus. The kit never reads a consumer repository as a design
+or release input.
+
+Forgejo is the authoritative Git service and the only push target. Do not
+push this repository to GitHub; any separately authorized read mirror is not
+a release authority.
+
 ## Quickstart
 
 1. Create your corpus repo from the template:
@@ -57,13 +74,20 @@ answer with confidence. The fix is **push-first**:
    `kernel/kernel.template.md`. Keep it under the cap; everything that
    doesn't make the cut becomes a Tier B doc.
 
-3. Wire the adapters (each is idempotent, one command):
+3. Wire or launch the adapters:
 
    | Harness | Tier A wiring |
    |---|---|
    | Claude Code | `adapters/claude/install.sh` — SessionStart hook emits the kernel |
    | Codex CLI | `adapters/codex/update-agents-md.sh` — managed block in `~/.codex/AGENTS.md` (global, loads every session) |
-   | pi | add `--append-system-prompt "$KNOWLEDGE_HOME/corpus/kernel/kernel.md"` to your launch argv (see `adapters/pi/README.md`); pi also auto-discovers repo `AGENTS.md`/`CLAUDE.md` |
+   | pi | launch through `adapters/pi/run.sh`, which validates the kernel before adding `--append-system-prompt`; pi also auto-discovers repo `AGENTS.md`/`CLAUDE.md` |
+
+   The code-backed adapters refuse symlinked, non-regular, or path-escaping
+   kernels and reject non-blob kernel entries when the corpus is a Git
+   checkout. The Codex adapter also refuses kernel content that contains
+   either managed-block marker as a whole line. This is source containment,
+   not a complete delivery-integrity boundary: the current checkout remains
+   mutable by the agent uid (`C1-b` in `docs/architecture.md`).
 
 4. Schedule `sync.sh pull` (cron / systemd timer / launchd) so every host
    converges on merge. Hosts keep their last-synced copy offline — the
