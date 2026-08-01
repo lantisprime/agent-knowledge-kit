@@ -57,7 +57,11 @@ Forgejo is the authoritative Git service and the only push target. Do not
 push this repository to GitHub; any separately authorized read mirror is not
 a release authority.
 
-## Quickstart
+## Prototype quickstart
+
+The commands below describe the shipped mutable-checkout prototype. They do
+not implement the accepted separate-identity, immutable-publication boundary;
+do not treat this workflow as hardened deployment.
 
 1. Create your corpus repo from the template:
 
@@ -122,11 +126,12 @@ rules that keep memory from rotting:
 
 ## Transports
 
-Plain `git` is the baseline and the only requirement. If your environment
-already has a file-distribution mechanism (a config-sync agent, rsync,
-object storage), point it at the corpus repo and deliver to the same
-`KNOWLEDGE_HOME` path — the adapters only care about the path, not the
-transport.
+For the current prototype, plain `git` is the baseline and the only
+requirement. If your environment already has a file-distribution mechanism (a
+config-sync agent, rsync, object storage), it may deliver to the same
+`KNOWLEDGE_HOME` path. Hardened delivery must instead enter through the
+protected publisher/control path and expose only an authenticated immutable
+corpus publication; transport choice does not bypass that boundary.
 
 ## Design questions to answer for your environment
 
