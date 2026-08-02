@@ -11,10 +11,11 @@ verification entry points, or canonical terminology changes.
 
 `agent-knowledge-kit` is the **public, generic framework** for a git-native
 knowledge layer that pushes durable environment knowledge into AI agent
-context deterministically. It has no build system, no dependencies beyond
-`git` and POSIX `sh`, and no runtime of its own — the deliverables are a
-schema, a kernel template, sync/publication primitives, and one thin adapter
-per harness.
+context deterministically. It has no build system or runtime of its own. The
+prototype requires Git and POSIX `sh`; production corpus authentication also
+requires a Git build with SSH signing support and standard OpenSSH/tar
+utilities. The deliverables are a schema, a kernel template,
+sync/publication primitives, and one thin adapter per harness.
 
 ## Self-governance boundary
 
@@ -44,8 +45,9 @@ system name here as a security regression, not a style issue.
 (default `~/.config/agent-knowledge`) and is the only thing the shipped
 adapters read. `.episodic-memory/` is gitignored for the same reason: local
 memory references the operating environment. `publisher/publish.sh` is a
-separate fixture-only transaction primitive; no adapter consumes its
-publications yet, and its production promotion verb is deliberately disabled.
+separate authenticated publication primitive; no default harness wiring
+consumes its publications yet, so authentication is not a hardened harness
+cutover by itself.
 
 ## Architecture
 
@@ -94,25 +96,31 @@ the outages it documents. Preserve this behavior when editing.
 
 ./publisher/publish.sh prepare <control-root> <publication-root>
 ./publisher/publish.sh promote-fixture <control-root> <publication-root> <candidate>
+./publisher/publish.sh promote <control-root> <publication-root> <bare-candidate> <release-tag-ref>
 ./publisher/publish.sh check <control-root> <publication-root>
 
 sh tests/run.sh                                   # all portable regressions
 sh tests/publisher/two-principal.sh               # privileged; exit 77 without prerequisites
 shellcheck adapters/sync.sh adapters/lib/kernel-path.sh \
   adapters/claude/install.sh adapters/codex/update-agents-md.sh \
-  adapters/pi/run.sh publisher/publish.sh tests/run.sh \
-  tests/publisher/run.sh tests/publisher/two-principal.sh
+  adapters/codex/render-protected-config.sh adapters/pi/run.sh \
+  publisher/publish.sh tests/run.sh tests/codex/protected-config.sh \
+  tests/publisher/run.sh tests/publisher/authentication.sh \
+  tests/publisher/two-principal.sh
 ```
 
 Env overrides for testing: `KNOWLEDGE_HOME` (target dir), `KNOWLEDGE_REMOTES`
 (comma-separated remote list, overrides `$KNOWLEDGE_HOME/.remotes`),
 `CODEX_HOME`.
 
-`tests/run.sh` runs the kernel-source/managed-marker regressions and the
-fixture-only publication transaction suite. The opt-in two-principal runner
+`tests/run.sh` runs the kernel-source/managed-marker regressions, local
+publication transaction suite, production authentication regressions, and the
+bounded Codex protected-config renderer regressions. The
+opt-in two-principal runner
 requires root plus pre-provisioned publisher, agent, and shared-group fixtures;
-exit 77 is a prerequisite skip, not C1-b evidence. Automated macOS/Linux
-execution and the broader adversarial matrix remain open. The kit's end-to-end
+exit 77 is a prerequisite skip, not C1-b evidence. Disposable APFS/ext4
+execution is recorded in `docs/verification/publisher-platforms.md`; consumer
+ancestor/supervisor and protected-harness checks remain open. The kit's end-to-end
 verification loop is still README step 5: open a **fresh agent session** on a
 synced host and ask what the environment's rules are — the answer must come
 from context with zero prompting and zero file reads. Capability claims about
@@ -126,17 +134,20 @@ settled decisions (including the separate-identity delivery trust boundary),
 the event-propagation layer (`sync.sh listen`, post-sync hook trust contract),
 known gaps, and the ordered implementation plan from two adversarial reviews
 (2026-07-28 and 2026-07-29). The accepted `C1-b` contract is frozen in
-`docs/plans/delivery-trust-boundary.md`; only its fixture-only publication
-transaction sub-slice is implemented. Read both before extending
+`docs/plans/delivery-trust-boundary.md`; authenticated local promotion and the
+fixture transaction are implemented, and the Codex managed-config renderer is
+an implemented cutover candidate; mandatory OS installation/enforcement and
+other boundary slices remain open. Read both before extending
 the sync or adapter layer; the gaps listed there are tracked deliberately —
 don't "fix" them silently in passing.
 
 **Do not treat the shipped code as hardened.** The containment slice now
 rejects corpus symlinks and Codex marker injection (`C2-b`, `H1-b`), with
-portable regressions. The fixture-only publisher exercises immutable staging,
-atomic selection, anti-rollback state, strict local integrity, and a
-publication mutex, but production authentication, proven ancestor/effective
-access, orphan-lock recovery, and protected harness wiring have not landed.
+portable regressions. The publisher exercises immutable staging, atomic
+selection, anti-rollback state, strict local integrity, a publication mutex,
+and signed Git-object authentication. Remote fetch/failover, proven complete
+ancestor/effective access, orphan-lock recovery, durability disposition, and
+mandatory/non-bypassable protected harness enforcement have not all landed.
 Adapters still read a *mutable, agent-writable* checkout, so commit signing
 secures transport and nothing yet secures end-to-end delivery. `init` also
 clones with no verification (`C3-b`), and host-clock sync age does not detect
@@ -158,8 +169,10 @@ orchestration, monitoring, or private corpus content.
 
 ## Conventions
 
-- **POSIX `sh`, `set -eu`, git-only dependency.** No bash-isms, no jq, no
-  Python. The publisher explicitly dispatches incompatible native macOS/Linux
+- **POSIX `sh`, `set -eu`, system-tool dependency only.** No bash-isms, no jq,
+  no Python. Production authentication additionally requires Git SSH-signing,
+  `ssh-keygen`, and `tar`. The publisher explicitly dispatches incompatible
+  native macOS/Linux
   `stat`, `find -perm`, `readlink -n`, and atomic symlink-replacement flags;
   never replace that selector operation with plain `mv` onto `current`. If a
   task needs a real parser, print the fragment and let the operator (or their

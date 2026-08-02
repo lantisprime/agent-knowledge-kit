@@ -5,8 +5,8 @@
 >   entry points without importing assumptions from a consumer repository.
 > - **Authority:** navigation aid; `AGENTS.md`, `CLAUDE.md`, accepted plans,
 >   tests, schemas, and implementation remain the governing evidence.
-> - **Verified:** 2026-08-01 against a working tree based on Forgejo `main` at
->   `c8f080b`.
+> - **Verified:** 2026-08-02 against a working tree based on Forgejo `main` at
+>   `313895c`.
 > - **Update trigger:** ownership, architecture, lifecycle, directory roles,
 >   supported adapters, verification entry points, or terminology changes.
 
@@ -18,11 +18,14 @@ kernel template, synchronization behavior, and harness adapters. It contains
 no environment-specific knowledge and operates independently of every
 consumer repository.
 
-The checked-in shell scripts are currently a happy-path prototype, not a
-hardened release system. `docs/architecture.md` records the accepted target
-and its ordered hardening plan. Claims such as draft exclusion, token-cap
-enforcement, authenticated releases, immutable publication, trigger-based
-Tier B loading, and event-driven synchronization are not implemented merely
+The default checked-in adapters remain a mutable-checkout prototype, not a
+hardened delivery system. The publisher now authenticates signed corpus Git
+objects before immutable local publication, and a bounded Codex renderer emits
+a validated managed-config candidate. Remote convergence and protected
+mandatory harness enforcement remain open. `docs/architecture.md` records the
+accepted target and ordered hardening plan. Claims such as draft exclusion,
+token-cap enforcement, completed protected harness cutover, trigger-based Tier
+B loading, and event-driven synchronization are not implemented merely
 because they appear in a schema or design document.
 
 ## 2. Authority and dependency direction
@@ -59,17 +62,21 @@ kit's schemas, code, roadmap, tags, or releases.
 | `CLAUDE.md` | Implementation constraints, commands, and known gaps | Authoritative guidance |
 | `README.md` | Public concept, quickstart, and corpus contract | Shipped interface plus policy prose |
 | `docs/architecture.md` | Threat model, accepted decisions, gaps, and ordered plan | Target design; not all implemented |
-| `docs/plans/delivery-trust-boundary.md` | Accepted `C1-b` identities, publication, migration, and verification contract | Accepted design; fixture transaction implemented, full boundary pending |
+| `docs/plans/delivery-trust-boundary.md` | Accepted `C1-b` identities, publication, migration, and verification contract | Accepted design; authenticated publication implemented, full boundary pending |
+| `docs/verification/publisher-platforms.md` | Reproducible macOS/Linux two-principal evidence | Platform verification record |
 | `adapters/sync.sh` | Clone, pull, and status prototype | Implemented, unhardened |
 | `adapters/lib/kernel-path.sh` | Shared kernel source validation | Implemented containment helper |
 | `adapters/claude/install.sh` | Claude SessionStart hook installer | Implemented, unhardened |
 | `adapters/codex/update-agents-md.sh` | Codex global managed-block updater | Implemented, unhardened |
+| `adapters/codex/render-protected-config.sh` | Validate an authenticated publication selector and render the Codex `model_instructions_file` managed-config key | Implemented cutover candidate; OS installation/enforcement pending |
 | `adapters/pi/run.sh` | Checked pi launcher | Implemented containment adapter |
 | `adapters/pi/README.md` | pi launch and discovery guidance | Public adapter instructions |
-| `publisher/publish.sh` | Fixture-only immutable publication transaction and integrity check | Implemented sub-slice; production promotion disabled |
-| `tests/run.sh` | Canonical portable adapter and publisher regressions | Implemented aggregate entry point |
-| `tests/publisher/run.sh` | Portable publication identity, state, failure, and concurrency regressions | Implemented fixture-only suite |
-| `tests/publisher/two-principal.sh` | Privileged macOS/Linux effective-access probe | Implemented runner; requires provisioned principals |
+| `publisher/publish.sh` | Authenticated immutable publication transaction and integrity check | Production and fixture promotion implemented; full delivery boundary pending |
+| `tests/run.sh` | Canonical portable adapter, publisher, authentication, and Codex renderer regressions | Implemented aggregate entry point |
+| `tests/publisher/run.sh` | Portable publication identity, state, failure, and concurrency regressions | Implemented local transaction suite |
+| `tests/publisher/authentication.sh` | Signed Git-object, policy, revocation, archive, and monotonicity regressions | Implemented production-authentication suite |
+| `tests/publisher/two-principal.sh` | Privileged macOS/Linux effective-access probe | Implemented runner; disposable-host evidence recorded separately |
+| `tests/codex/protected-config.sh` | Portable Codex protected-config rendering and rejection regressions | Implemented candidate-path suite |
 | `kernel/kernel.template.md` | Shape of an environment Tier A kernel | Template; currently draft |
 | `schema/frontmatter.md` | Minimal corpus document schema | Prose contract; enforcement absent |
 | `LICENSE` | MIT license | Release/legal boundary |
@@ -95,15 +102,16 @@ Accepted target after delivery containment and corpus release authentication:
 ```text
 remote corpus candidate
     -> publisher-only control root/quarantine
-    -> authenticated corpus release
+    -> signed commit/tag and protected policy verification
     -> atomic immutable version under protected publication root
     -> protected harness adapter/configuration
     -> Tier A kernel in a fresh agent context
 ```
 
 The accepted `C1-b` decision requires distinct publisher and agent principals;
-its fixture-only local transaction primitive is implemented, but protected
-harness delivery and complete platform evidence are not. The kit supplies
+its authenticated local transaction primitive and bounded Codex config
+renderer are implemented, but remote convergence, complete boundary evidence,
+and mandatory/non-bypassable harness enforcement are not. The kit supplies
 generic tooling. The consumer provisions the identities, protected absolute
 roots, scheduler, secret transport, monitoring, and deployment mechanism. The
 private corpus supplies all environment content. Those layers may depend on a
@@ -117,32 +125,43 @@ pinned kit release; the kit does not depend on their repositories.
 - Last-known corpus retained when all pulls fail.
 - Claude SessionStart hook generation.
 - Codex managed-block generation.
+- A Codex managed-config candidate renderer that accepts only a normalized
+  physical publication root, exact relative selector, physical release, and
+  regular selected kernel, without environment path authority or fallback.
 - Checked pi command-line launcher.
 - Regular-file, git-tree-mode, and canonical-path validation before adapters
   read a kernel.
 - Whole-line managed-marker rejection before Codex touches its target.
 - Portable regression fixtures for the containment behaviors above.
-- A fixture-only publisher transaction with strict release identities,
+- An authenticated publisher transaction with protected repository/ref/signer
+  policy, signed commit and tag verification, full Git object/archive binding,
+  revocation, branch reachability, monotonic sequence enforcement,
   same-filesystem staging, atomic selection, anti-rollback/equivocation state,
   fail-closed local integrity, and portable failure/concurrency regressions.
-- An opt-in two-principal macOS/Linux runner that never creates accounts and
-  reports missing prerequisites as exit 77 rather than security success.
+- A separate explicitly named fixture promotion path for transaction testing.
+- Portable Codex renderer tests for hostile environment values, symlinked
+  roots and kernels, malformed selectors, and TOML path injection.
+- An opt-in two-principal macOS/Linux runner that never creates accounts,
+  reports missing prerequisites as exit 77, and has recorded disposable-host
+  executions in `docs/verification/publisher-platforms.md`.
 - Markdown frontmatter and kernel templates.
 
 ### Required before hardened use
 
-- Recorded successful two-principal execution on supported macOS and Linux,
-  complete ancestor/effective-access and installed-code verification, safe
-  orphaned publication-lock recovery, and protected mandatory harness wiring.
+- Complete ancestor/effective-access and installed-code verification, safe
+  orphaned publication-lock recovery, and protected mandatory harness
+  installation/enforcement (including alternate-invocation prevention and
+  captured fresh-session bytes).
 - Tests for the remaining URL, state, target-path, and draft failure modes.
 - Canonical-path and file-type containment for adapter targets.
 - Atomic, locked writes that preserve user-owned content or fail safely.
 - Structured remote parsing, redacted logs, and restrictive state files.
 - One versioned corpus layout plus versioned frontmatter and routing schemas.
-- Verified bootstrap, authenticated immutable corpus releases, anti-rollback,
+- Remote bootstrap/failover into quarantine, authoritative currency checks,
   and fail-loud operator status.
 - Enforced draft exclusion and size limits; defined Tier B routing/loading.
-- Platform verification on supported macOS and Linux shells.
+- Repeat platform verification for later boundary slices and consumer-specific
+  verification on every supported macOS and Linux configuration.
 
 Do not add fleet-wide hooks, listeners, or deployment automation ahead of
 the containment and corpus-release-authentication sequence.
@@ -185,13 +204,14 @@ sh -n adapters/pi/run.sh
 sh -n publisher/publish.sh
 sh -n tests/run.sh
 sh -n tests/publisher/run.sh
+sh -n tests/publisher/authentication.sh
 sh -n tests/publisher/two-principal.sh
 sh tests/run.sh
 ```
 
 Current manual happy-path checks are documented in `README.md`.
-`tests/run.sh` covers `C2-b` source containment, `H1-b` marker injection, and
-the fixture-only publication transaction on the local platform. Run
+`tests/run.sh` covers `C2-b` source containment, `H1-b` marker injection,
+local publication transactions, and production corpus authentication. Run
 `tests/publisher/two-principal.sh` only with its documented privileged
 fixtures; exit 77 is not pass evidence. The complete macOS/Linux adversarial
 matrix remains plan step 9.

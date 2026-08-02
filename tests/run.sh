@@ -353,7 +353,9 @@ if [ "$failures" -ne 0 ]; then
     exit 1
 fi
 
-# Keep the fixture-only publication transaction in the canonical portable
-# verification command. It emits its own TAP document and fails this runner on
-# any publication regression.
-"$TEST_DIR/publisher/run.sh"
+# Keep local publication and production authentication in the canonical
+# portable verification command. Each emits its own TAP document and fails
+# this runner on a regression.
+"$TEST_DIR/publisher/run.sh" || exit 1
+"$TEST_DIR/publisher/authentication.sh" || exit 1
+"$TEST_DIR/codex/protected-config.sh" || exit 1

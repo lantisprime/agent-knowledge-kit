@@ -1,6 +1,7 @@
 #!/bin/sh
-# Portable regression suite for the fixture-only publication transaction.
+# Portable regressions for local publication integrity and fixture transactions.
 set -u
+umask 077
 
 TEST_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH= cd "$TEST_DIR/../.." && pwd -P)
@@ -93,13 +94,13 @@ B32=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 C32=cccccccccccccccccccccccccccccccc
 D32=dddddddddddddddddddddddddddddddd
 
-test_production_promotion_disabled() {
-    new_case production-disabled
-    if expect_failure 'authentication-unavailable' "$case_root/promote" \
+test_production_promotion_requires_complete_arguments() {
+    new_case production-arguments
+    if expect_failure 'usage' "$case_root/promote" \
         "$PUBLISHER" promote "$control_root" "$publication_root"; then
-        pass 'production promotion is unreachable before authentication lands'
+        pass 'production promotion requires the complete authenticated interface'
     else
-        fail 'production promotion is unreachable before authentication lands'
+        fail 'production promotion requires the complete authenticated interface'
     fi
 }
 
@@ -573,7 +574,7 @@ if [ ! -x "$PUBLISHER" ]; then
     exit 1
 fi
 
-test_production_promotion_disabled
+test_production_promotion_requires_complete_arguments
 test_bootstrap_resolve_and_hostile_environment
 test_invalid_identity_rejected
 test_strict_records_reject_unterminated_trailing_data

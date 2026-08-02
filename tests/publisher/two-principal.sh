@@ -1,5 +1,5 @@
 #!/bin/sh
-# Privileged platform probe for the fixture-only publisher boundary.
+# Privileged platform probe for the local publisher boundary.
 #
 # This suite never creates accounts. Run it only on a disposable macOS/Linux
 # host with two pre-provisioned, distinct, non-root users. Exit 77 means the
@@ -10,6 +10,10 @@ TEST_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH= cd "$TEST_DIR/../.." && pwd -P)
 SOURCE_PUBLISHER="$REPO_ROOT/publisher/publish.sh"
 PLATFORM=$(/usr/bin/uname -s)
+# Principal runners inherit the caller's working directory on macOS. Use a
+# universally traversable directory so a protected caller home cannot make
+# otherwise-valid fixture commands fail before their access checks.
+cd /
 
 tests=0
 failures=0
@@ -82,10 +86,14 @@ esac
 case "$PLATFORM" in
 Darwin)
     USER_RUNNER=/usr/bin/sudo
+    CHOWN=/usr/sbin/chown
+    TEST_COMMAND=/bin/test
     [ -x "$USER_RUNNER" ] || skip_suite 'sudo is unavailable'
     TEST_PARENT=/private/var/db
     ;;
 Linux)
+    CHOWN=/usr/bin/chown
+    TEST_COMMAND=/usr/bin/test
     if [ -x /usr/sbin/runuser ]; then
         USER_RUNNER=/usr/sbin/runuser
     elif [ -x /usr/bin/sudo ]; then
@@ -127,14 +135,14 @@ TEST_ROOT=$(/usr/bin/mktemp -d "$TEST_PARENT/akk-publisher-platform.XXXXXX") || 
 /bin/chmod 0755 "$TEST_ROOT"
 /bin/mkdir "$TEST_ROOT/bin"
 /bin/cp "$SOURCE_PUBLISHER" "$TEST_ROOT/bin/publish.sh"
-/bin/chown 0:0 "$TEST_ROOT/bin" "$TEST_ROOT/bin/publish.sh"
+"$CHOWN" 0:0 "$TEST_ROOT/bin" "$TEST_ROOT/bin/publish.sh"
 /bin/chmod 0555 "$TEST_ROOT/bin" "$TEST_ROOT/bin/publish.sh"
 PROTECTED_PUBLISHER="$TEST_ROOT/bin/publish.sh"
 
 CONTROL_ROOT="$TEST_ROOT/control"
 PUBLICATION_ROOT="$TEST_ROOT/publication"
 /bin/mkdir "$CONTROL_ROOT" "$PUBLICATION_ROOT"
-/bin/chown "$PUBLISHER_UID:$PUBLISHER_GID" "$CONTROL_ROOT" "$PUBLICATION_ROOT"
+"$CHOWN" "$PUBLISHER_UID:$PUBLISHER_GID" "$CONTROL_ROOT" "$PUBLICATION_ROOT"
 /bin/chmod 0700 "$CONTROL_ROOT"
 /bin/chmod 0755 "$PUBLICATION_ROOT"
 run_as "$PUBLISHER_USER" "$PROTECTED_PUBLISHER" prepare \
@@ -145,7 +153,7 @@ CANDIDATE="$CONTROL_ROOT/quarantine/fixture"
 /usr/bin/printf '%s\nsequence 1\ndigest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' \
     'agent-knowledge-kit-authenticated-test-fixture-v1' > "$CANDIDATE/authenticated.fixture"
 /usr/bin/printf 'platform fixture\n' > "$CANDIDATE/corpus/kernel/kernel.md"
-/bin/chown -R "$PUBLISHER_UID:$PUBLISHER_GID" "$CANDIDATE"
+"$CHOWN" -R "$PUBLISHER_UID:$PUBLISHER_GID" "$CANDIDATE"
 /bin/chmod -R go-w "$CANDIDATE"
 run_as "$PUBLISHER_USER" "$PROTECTED_PUBLISHER" promote-fixture \
     "$CONTROL_ROOT" "$PUBLICATION_ROOT" "$CANDIDATE" >/dev/null
@@ -154,7 +162,7 @@ RELEASE_ID=r1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 RELEASE_ROOT="$PUBLICATION_ROOT/releases/$RELEASE_ID"
 KERNEL="$RELEASE_ROOT/corpus/kernel/kernel.md"
 
-if run_as "$AGENT_USER" /usr/bin/test -r "$KERNEL" &&
+if run_as "$AGENT_USER" "$TEST_COMMAND" -r "$KERNEL" &&
     [ "$(run_as "$AGENT_USER" /bin/cat "$KERNEL")" = 'platform fixture' ]; then
     pass 'agent can read the selected immutable kernel'
 else
@@ -179,7 +187,7 @@ else
 fi
 
 /usr/bin/printf 'publisher secret\n' > "$CONTROL_ROOT/trust/probe-secret"
-/bin/chown "$PUBLISHER_UID:$PUBLISHER_GID" "$CONTROL_ROOT/trust/probe-secret"
+"$CHOWN" "$PUBLISHER_UID:$PUBLISHER_GID" "$CONTROL_ROOT/trust/probe-secret"
 /bin/chmod 0600 "$CONTROL_ROOT/trust/probe-secret"
 if ! run_as "$AGENT_USER" /bin/cat "$CONTROL_ROOT/trust/probe-secret" >/dev/null 2>&1 &&
     ! run_as "$AGENT_USER" /usr/bin/touch "$CONTROL_ROOT/checkout/agent-write" >/dev/null 2>&1 &&
@@ -189,7 +197,7 @@ else
     fail 'agent cannot read secrets or mutate control-root classes'
 fi
 
-/bin/chgrp "$SHARED_GROUP" "$PUBLICATION_ROOT"
+/usr/bin/chgrp "$SHARED_GROUP" "$PUBLICATION_ROOT"
 /bin/chmod 0775 "$PUBLICATION_ROOT"
 if ! run_as "$PUBLISHER_USER" "$PROTECTED_PUBLISHER" check \
         "$CONTROL_ROOT" "$PUBLICATION_ROOT" >/dev/null 2>&1 &&
@@ -199,7 +207,7 @@ else
     fail 'unsafe shared-group write is both effective and rejected by integrity status'
 fi
 /bin/rm -f "$PUBLICATION_ROOT/group-write-probe"
-/bin/chown "$PUBLISHER_UID:$PUBLISHER_GID" "$PUBLICATION_ROOT"
+"$CHOWN" "$PUBLISHER_UID:$PUBLISHER_GID" "$PUBLICATION_ROOT"
 /bin/chmod 0755 "$PUBLICATION_ROOT"
 
 case "$PLATFORM" in
@@ -223,8 +231,8 @@ Linux) /usr/bin/setfacl -b "$PUBLICATION_ROOT" ;;
 esac
 /bin/rm -f "$PUBLICATION_ROOT/acl-write-probe"
 
-if ! run_as "$AGENT_USER" /usr/bin/test -w "$PROTECTED_PUBLISHER" &&
-    ! run_as "$AGENT_USER" /usr/bin/test -w "$TEST_ROOT/bin"; then
+if ! run_as "$AGENT_USER" "$TEST_COMMAND" -w "$PROTECTED_PUBLISHER" &&
+    ! run_as "$AGENT_USER" "$TEST_COMMAND" -w "$TEST_ROOT/bin"; then
     pass 'agent cannot alter the protected publisher executable or directory'
 else
     fail 'agent cannot alter the protected publisher executable or directory'

@@ -53,7 +53,7 @@ tests where present, as implemented; policy prose is not enforcement.
                                                           │
                                                           ▼
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║  HOST — ACCEPTED TARGET (fixture transaction only; boundary incomplete)      ║
+║  HOST — ACCEPTED TARGET (authenticated local publish; boundary incomplete)  ║
 ║                                                                              ║
 ║  PUBLISHER PRINCIPAL                                                         ║
 ║   event fast-path (doorbell) ─┐                                              ║
@@ -108,8 +108,9 @@ authority is total, which drives the security decisions below.
   transport state and atomically exposes immutable, versioned releases
   through paths the agent principal cannot change. Protected adapter wiring,
   hooks, keys, state, locks, and selectors are part of the same boundary.
-  The decision is accepted; only its fixture-only transaction sub-slice is
-  implemented. The frozen contract is
+  The decision is accepted; authenticated local publication is implemented,
+  while mandatory protected harness wiring and other boundary slices remain
+  open. The frozen contract is
   `docs/plans/delivery-trust-boundary.md`.
 - **Fail-soft for consumers, fail-loud for operators.** `pull` keeps
   exiting 0 on unreachable remotes; `status` is the monitoring surface
@@ -180,27 +181,43 @@ non-agent-writable, renames it into a never-mutated version directory, and
 atomically replaces `current`. Readers resolve `current` once and use that
 physical version for the operation. Failure retains the last-good selector;
 local-integrity failure never falls back to the mutable checkout. Production
-publication remains gated on step 2 corpus release authentication.
+local publication is gated on signed corpus release authentication; remote
+currency and transport convergence remain separate open steps.
 
-`publisher/publish.sh` now implements a fixture-only transaction core for
-strict test release identities: serialized promotion, same-filesystem staging,
-atomic macOS/Linux selector replacement, immutable published bytes,
-anti-rollback/equivocation state, narrow post-selector recovery, and fail-loud
-local integrity. `tests/publisher/run.sh` supplies portable regressions, and
+`publisher/publish.sh` now implements authenticated promotion from a protected
+bare Git quarantine repository plus the explicit fixture transaction:
+repository/ref/signer policy, signed commit/tag verification, full
+commit/tree/corpus/archive identity binding, revocation, reachability,
+serialized same-filesystem staging, atomic macOS/Linux selector replacement,
+immutable published bytes, anti-rollback/equivocation state, narrow
+post-selector recovery, and fail-loud local integrity.
+`tests/publisher/run.sh` and `tests/publisher/authentication.sh` supply portable
+regressions, and
 `tests/publisher/two-principal.sh` is an opt-in privileged probe that requires
-pre-provisioned identities. Production promotion remains unreachable.
+pre-provisioned identities.
 
-This does not complete the boundary. The current checkout has not produced
-real two-principal evidence; every-ancestor/effective-access and installed-code
-proof, safe orphan-lock recovery, production release authentication, and
-protected mandatory harness wiring remain pending. All shipped adapters still
-consume the mutable prototype checkout, so zero harnesses are advertised as
-hardened.
+This does not complete the boundary. Disposable-host two-principal evidence is
+recorded separately, while complete every-ancestor/effective-access and
+installed-code proof, safe orphan-lock recovery, durability disposition,
+remote fetch/failover, and protected mandatory harness wiring remain pending.
+All default harness wiring still consumes the mutable prototype checkout, so
+zero harnesses are advertised as hardened.
+
+The first protected-harness cutover candidate is
+`adapters/codex/render-protected-config.sh`. It validates one normalized
+physical publication root, the exact relative selector and selected release,
+and the regular kernel before rendering Codex's `model_instructions_file`
+managed-config key. It intentionally does not install system configuration.
+The candidate closes environment path authority and fallback in the renderer,
+but does not prove that the agent principal cannot replace the managed config
+or executable, invoke an alternate binary/configuration, or bypass injection.
+Those OS-policy checks and a captured fresh-session byte comparison remain
+required before Codex is advertised as hardened.
 
 `docs/plans/delivery-trust-boundary.md` is the accepted, falsifiable contract:
 it defines identities, logical roots, trust assumptions, migration, non-goals,
 and the required two-principal macOS/Linux tests. Treat the implemented
-fixture transaction as one bounded sub-slice, not enforcement of the full
+authenticated publisher as one bounded sub-slice, not enforcement of the full
 contract.
 
 ## Event layer — components
@@ -245,9 +262,12 @@ Requirements (review M1/M2/M4):
 Run by `pull` as the publisher principal so downstream consumers re-apply the
 kernel. The historical first user was the Codex adapter, whose agent-writable
 `~/.codex/AGENTS.md` snapshot currently freezes because nothing re-runs it;
-that target remains prototype-only and cannot satisfy hardened step 1. A
-protected Codex injection point still must be proven. `<control-root>` is the
-publisher-only root defined by the accepted delivery-boundary plan.
+that target remains prototype-only and cannot satisfy hardened step 1. The
+bounded managed-config renderer starts a protected Codex path, but the
+consumer's system installation, alternate-invocation prevention, and captured
+injection proof still must establish that the injection point is mandatory.
+`<control-root>` is the publisher-only root defined by the accepted
+delivery-boundary plan.
 
 **Trust contract (review C1 — the design's only code-execution story;
 non-negotiable):**
@@ -550,8 +570,8 @@ step lands with its verify.
    preservation, a kernel without a final newline, idempotency, both corpus
    layouts, non-Git delivery, and nested-first precedence across all three
    adapters.
-1. **Delivery trust boundary (`C1-b`) — accepted design; fixture transaction
-   implemented, boundary pending (2026-08-01).** Option (a) is selected:
+1. **Delivery trust boundary (`C1-b`) — accepted design; authenticated local
+   publication implemented, boundary pending (2026-08-02).** Option (a) is selected:
    synchronization and
    publication run as a dedicated publisher principal; protected control
    state is never agent-readable where secret and never agent-writable; and
@@ -560,12 +580,13 @@ step lands with its verify.
    hook/configuration replacement attack intact. The exact contract and
    bounded implementation slices are frozen in
    `docs/plans/delivery-trust-boundary.md`. Do not interpret the accepted
-   decision or the fixture-only publisher as enforcement by current adapters.
-   The transaction sub-slice has portable identity, selector, state,
-   concurrency, signal, and corruption regressions. Its privileged runner was
-   not executable in this checkout because distinct provisioned principals and
-   non-interactive elevation are absent; orphan-lock recovery, protected
-   harness paths, and production authentication remain pending.
+   decision or the publisher as enforcement by current adapters. The
+   transaction sub-slice has portable identity, authentication, selector,
+   state, concurrency, signal, and corruption regressions. Its two-principal
+   macOS/Linux executions are recorded in
+   `docs/verification/publisher-platforms.md`;
+   complete ancestor proof, safe orphan-lock recovery, durability disposition,
+   and protected harness paths remain pending.
    → verify: under distinct real principals, the agent cannot edit, replace,
    redirect, or unlink the delivered kernel, active selector, control state,
    or mandatory harness wiring, nor bypass injection through direct invocation
@@ -575,13 +596,18 @@ step lands with its verify.
    fail; local-integrity failure never falls back to the mutable checkout; and
    captured injected bytes match one physical published version on supported
    macOS and Linux configurations.
-2. **Verified bootstrap + corpus release authentication (`C3-b`, old H1)** —
+2. **Verified bootstrap + corpus release authentication (`C3-b`, old H1) —
+   authenticated local promotion implemented; remote convergence pending.**
    pin repository identity, ref, and authorized signer or CI attestor;
    publish a signed corpus release manifest carrying full commit and tree
    hashes plus a monotonic version; verify in quarantine *before*
    exposing content, on `init` and `pull` alike (`fetch` +
    `verify-commit FETCH_HEAD` + `merge --ff-only`, failing soft to the
-   next remote). Note shallow-clone signature reachability (L3).
+   next remote). Local `promote` now enforces signed commit/tag identity,
+   repository/ref/signer policy, full object/archive binding, reachability,
+   revocation, and sequence monotonicity on bootstrap and update candidates in
+   protected quarantine. Remote fetch/failover and typed currency state remain
+   open. Note shallow-clone signature reachability (L3).
    → verify: fresh `init` against an unsigned or wrong-signer remote
    exposes no content; unsigned on remote A + signed on remote B →
    converges to B; all-unsigned → keeps last-good and state records why;

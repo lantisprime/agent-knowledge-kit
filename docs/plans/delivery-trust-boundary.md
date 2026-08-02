@@ -1,13 +1,17 @@
 # Delivery trust boundary plan
 
-Status: **accepted design; fixture transaction implemented, boundary pending**
-(2026-08-01)
+Status: **accepted design; authenticated publication implemented, boundary
+pending** (2026-08-02)
 
 Implementation note: `publisher/publish.sh` and its portable regressions cover
-only the authenticated-test-fixture publication transaction. Production
-authentication, successful two-principal platform evidence, every-ancestor
-and installed-code proof, orphan-lock recovery, and mandatory harness wiring
-remain pending. This note does not alter the frozen requirements below.
+the authenticated-test-fixture transaction and production promotion from a
+protected bare Git quarantine repository. Production promotion verifies
+signed commit/tag identity, protected repository/ref/signer policy, exact
+commit/tree/corpus/archive identities, reachability, revocation, and monotonic
+sequence before immutable selection. Remote fetch/failover, complete
+every-ancestor and installed-code proof, orphan-lock recovery, durability
+disposition, and mandatory harness wiring remain pending. This note does not
+alter the frozen requirements below.
 
 Decision: adopt the separate-identity, immutable-publication resolution for
 `C1-b`. Local agents are not fully trusted merely because they share an OS
@@ -132,9 +136,11 @@ update:
 
 1. Fetch into a unique publisher-only checkout or control-root quarantine
    path.
-2. Authenticate the candidate according to plan step 2 and derive its corpus
-   release id. Until that step lands, publication code may use authenticated
-   test fixtures, but production cutover stays disabled.
+2. Authenticate the candidate according to architecture-plan step 2 and derive
+   its corpus release id. The production publisher now implements local
+   authenticated promotion; test-only transactions use explicitly named
+   authenticated fixtures. Remote retrieval and authoritative currency remain
+   separate open slices.
 3. Acquire a dedicated publisher-only publication mutex using an atomic
    operation. This mutex is part of step 1 and is distinct from the later pull
    mutex. Only one promotion may validate sequence, change `current`, or write
@@ -310,8 +316,8 @@ This decision-record slice changes documentation and ignore rules only. The
 follow-on implementation should land as bounded, independently reviewed
 slices: protected publisher primitive and two-principal tests; protected
 adapter/configuration paths per harness; then consumer migration guidance.
-Corpus release authentication remains architecture-plan step 2 and must gate
-production publication. The publication mutex and minimal selector/state
-integrity check belong to step 1; the broader pull mutex, durability
+Corpus release authentication gates production publication. The publication
+mutex and minimal selector/state integrity check belong to step 1; the broader
+remote pull/failover path, pull mutex, durability
 disposition, post-sync execution, status/currency, transport enforcement,
 listeners, and Tier B loading retain their existing ordered plan positions.
