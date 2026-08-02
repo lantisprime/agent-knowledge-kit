@@ -80,6 +80,23 @@ remote metadata, filesystem paths, managed-block markers, and adapter targets
 as untrusted. Do not expand deployment or fleet automation until the delivery
 trust boundary and release authentication are implemented and tested.
 
+## Session handoff persistence
+
+- When producing a session handoff, store the same substantive handoff in the
+  project-local episodic-memory store under `.episodic-memory/episodes/` before
+  declaring wrap-up complete. Use project `agent-knowledge-kit`, category
+  `context`, and tag `handoff`; do not rely on a Codex transcript as the only
+  durable copy.
+- Include the decisions, files changed, repository state, exact verification,
+  limitations, and next concrete step. Do not store credentials, private corpus
+  content, or environment-specific infrastructure details.
+- When the operator asks to `load handoff`, search active project-local
+  `handoff` episodes first and load the newest one. If none exists, check the
+  canonical session handoff and then prior Codex session transcripts, and state
+  which source was used.
+- Treat a handoff as historical context rather than current-state proof.
+  Reconcile it with the required start-of-task Git checks before acting.
+
 ## Repository boundaries
 
 - `agent-knowledge-kit`: generic, public framework and its release lifecycle.
