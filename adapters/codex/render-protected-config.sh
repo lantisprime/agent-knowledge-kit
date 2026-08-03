@@ -65,6 +65,8 @@ release_digest=${release_identity#*-}
 case "$release_sequence" in
 ''|0*|*[!0-9]*) die 'current selector target is malformed' ;;
 esac
+[ "${#release_sequence}" -le 18 ] ||
+    die 'current selector target is malformed'
 case "$release_digest" in
 ''|*[!0-9a-f]*) die 'current selector target is malformed' ;;
 esac

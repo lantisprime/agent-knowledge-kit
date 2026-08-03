@@ -103,10 +103,22 @@ test_malformed_selectors_rejected_without_fallback() {
         "$RENDERER" "$publication_root"; then
         parent_ok=1
     fi
-    if [ "$absolute_ok" -eq 1 ] && [ "$parent_ok" -eq 1 ]; then
-        pass 'absolute and escaping selectors fail closed without output'
+    rm "$publication_root/current"
+    long_sequence_id=r1000000000000000000-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    mkdir -p "$publication_root/releases/$long_sequence_id/corpus/kernel"
+    printf '%s\n' malformed-sequence \
+        > "$publication_root/releases/$long_sequence_id/corpus/kernel/kernel.md"
+    ln -s "releases/$long_sequence_id" "$publication_root/current"
+    long_sequence_ok=0
+    if expect_rejection "$case_root/long-sequence-selector" \
+        "$RENDERER" "$publication_root"; then
+        long_sequence_ok=1
+    fi
+    if [ "$absolute_ok" -eq 1 ] && [ "$parent_ok" -eq 1 ] &&
+        [ "$long_sequence_ok" -eq 1 ]; then
+        pass 'absolute, escaping, and overlong selectors fail closed without output'
     else
-        fail 'absolute and escaping selectors fail closed without output'
+        fail 'absolute, escaping, and overlong selectors fail closed without output'
     fi
 }
 
