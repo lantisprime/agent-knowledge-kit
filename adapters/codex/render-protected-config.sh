@@ -45,7 +45,10 @@ selector="$publication_root/current"
 [ -L "$selector" ] || die 'current selector must be a symbolic link'
 selector_capture=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/akk-codex-selector.XXXXXX") ||
     die 'cannot allocate selector validation state'
-trap '/bin/rm -f "$selector_capture"' EXIT HUP INT TERM
+trap '/bin/rm -f "$selector_capture"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 /usr/bin/readlink "$selector" > "$selector_capture" ||
     die 'current selector is unreadable'
 selector_lines=$(/usr/bin/wc -l < "$selector_capture" | /usr/bin/tr -d ' ')

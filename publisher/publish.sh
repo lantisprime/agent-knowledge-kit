@@ -1083,9 +1083,10 @@ authenticate_candidate() {
     fi
     [ "$(git_clean --git-dir="$candidate" cat-file -t "$release_corpus_tree" 2>/dev/null)" = tree ] ||
         die authentication-failed 'release corpus object is not a tree'
-    unsafe_modes=$(git_clean --git-dir="$candidate" ls-tree -r --format='%(objectmode)' "$release_corpus_tree" 2>/dev/null |
-        /usr/bin/sed '/^100644$/d; /^100755$/d') ||
+    git_clean --git-dir="$candidate" ls-tree -r --format='%(objectmode)' "$release_corpus_tree" \
+        > "$AUTH_TEMP/corpus-modes" 2>/dev/null ||
         die candidate-invalid 'cannot inspect release corpus modes'
+    unsafe_modes=$(/usr/bin/sed '/^100644$/d; /^100755$/d' "$AUTH_TEMP/corpus-modes")
     [ -z "$unsafe_modes" ] || die candidate-invalid 'release corpus contains a symbolic link, gitlink, or special mode'
     kernel_entry=$(git_clean --git-dir="$candidate" ls-tree "$release_commit" -- corpus/kernel/kernel.md 2>/dev/null) ||
         die candidate-invalid 'cannot inspect production kernel entry'
