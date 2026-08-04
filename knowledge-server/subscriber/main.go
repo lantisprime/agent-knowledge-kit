@@ -18,12 +18,15 @@ import (
 	"archive/tar"
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -59,9 +62,11 @@ type heartbeatBody struct {
 }
 
 func main() {
-	server := flag.String("server", "", "knowledge-server base URL, e.g. http://127.0.0.1:8471 (required)")
+	server := flag.String("server", "", "knowledge-server base URL, e.g. https://ks.example:8471 (required)")
 	home := flag.String("home", defaultHome(), "KNOWLEDGE_HOME directory")
-	host := flag.String("host", defaultHost(), "host id reported to the server")
+	host := flag.String("host", defaultHost(), "host id reported to the server; ignored when -token-file is set (the token's bound identity is used)")
+	tokenFile := flag.String("token-file", "", "path to this host's bearer token; sent as Authorization: Bearer on every request. Assumes the server has auth enabled; against an auth-disabled server, corpus sync still works but heartbeats and force-resync are inert.")
+	caFile := flag.String("ca-file", "", "PEM CA bundle used to verify the server's TLS certificate (for private/self-signed CAs)")
 	interval := flag.Duration("interval", 60*time.Second, "poll interval between converge passes")
 	once := flag.Bool("once", false, "run a single converge pass and exit (for cron and tests)")
 	flag.Parse()
@@ -69,18 +74,105 @@ func main() {
 	if *server == "" {
 		log.Fatal("-server is required")
 	}
+	// Flag misconfiguration fails hard (like a missing -server): it is
+	// an operator error at setup time, not a runtime outage the
+	// fail-soft contract covers.
+	token := ""
+	if *tokenFile != "" {
+		b, err := os.ReadFile(*tokenFile)
+		if err != nil {
+			log.Fatalf("read -token-file: %v", err)
+		}
+		if token = strings.TrimSpace(string(b)); token == "" {
+			log.Fatalf("-token-file %s is empty", *tokenFile)
+		}
+	}
+	if err := validateServerURL(*server, token); err != nil {
+		log.Fatal(err)
+	}
+	hc, err := newHTTPClient(*caFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// With a token the server resolves this host's identity from it
+	// (the name bound at issuance), so no hostname travels on the wire
+	// and issuance-vs-hostname drift cannot cause a mismatch.
+	wireHost := *host
+	if token != "" {
+		wireHost = ""
+	}
 
 	base := strings.TrimRight(*server, "/")
-	hc := &http.Client{Timeout: 30 * time.Second}
-
-	converge(base, *home, *host, hc)
+	converge(base, *home, wireHost, token, hc)
 	if *once {
 		return
 	}
 	for {
 		time.Sleep(*interval)
-		converge(base, *home, *host, hc)
+		converge(base, *home, wireHost, token, hc)
 	}
+}
+
+// newHTTPClient builds the API client. With caFile it pins TLS server
+// verification to that PEM bundle instead of the system roots.
+// CheckRedirect is always set to refuse redirects: the knowledge-server
+// API never redirects, and Go's default policy forwards Authorization
+// on same-host redirects even across an HTTPS→HTTP downgrade, which
+// would leak the bearer token in plaintext to the redirect target.
+func newHTTPClient(caFile string) (*http.Client, error) {
+	hc := &http.Client{Timeout: 30 * time.Second}
+	hc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return fmt.Errorf("refusing redirect to %s", req.URL)
+	}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read -ca-file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("-ca-file %s: no certificates found", caFile)
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+	}
+	return hc, nil
+}
+
+// validateServerURL rejects configurations that would send the bearer
+// token in plaintext to a non-loopback host. With token == "" there is
+// no credential to leak and every URL is accepted. With token != "",
+// https is always allowed and http is allowed only to a loopback host
+// (localhost, 127.0.0.0/8, ::1). Called from main() before any
+// network I/O; failure is an operator-config error and fails hard.
+func validateServerURL(server, token string) error {
+	if token == "" {
+		return nil
+	}
+	u, err := url.Parse(server)
+	if err != nil {
+		return fmt.Errorf("invalid -server URL: %w", err)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
+		return nil
+	}
+	return fmt.Errorf("refusing to send bearer token over %s to non-loopback host %q (use https, or http to a loopback address)", u.Scheme, u.Hostname())
+}
+
+// isLoopbackHost mirrors the server's check (main.go) so the client
+// uses the same definition of "loopback": the literal "localhost"
+// string, IPv4 127.0.0.0/8, and IPv6 ::1.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func defaultHome() string {
@@ -103,11 +195,11 @@ func defaultHost() string {
 // via a heartbeat, and the previous corpus is left untouched. This is
 // the fail-soft contract — an unreachable or misbehaving server must
 // never break the caller.
-func converge(server, home, host string, hc *http.Client) {
-	cur, err := fetchCurrent(hc, server, host)
+func converge(server, home, host, token string, hc *http.Client) {
+	cur, err := fetchCurrent(hc, server, host, token)
 	if err != nil {
 		log.Printf("subscriber: fetch current release: %v", err)
-		heartbeat(hc, server, host, 0, false, err.Error(), false)
+		heartbeat(hc, server, host, token, 0, false, err.Error(), false)
 		return
 	}
 
@@ -120,7 +212,7 @@ func converge(server, home, host string, hc *http.Client) {
 	if cur.Resync {
 		if err := os.Remove(appliedPath); err != nil && !os.IsNotExist(err) {
 			log.Printf("subscriber: clear applied marker for resync: %v", err)
-			heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+			heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 			return
 		}
 		resyncFired = true
@@ -130,14 +222,14 @@ func converge(server, home, host string, hc *http.Client) {
 	if appliedID, appliedHash, ok := readApplied(appliedPath); ok &&
 		appliedID == curIDStr && appliedHash == cur.ContentHash {
 		// Already converged.
-		heartbeat(hc, server, host, cur.ReleaseID, true, "", false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, true, "", false)
 		return
 	}
 
 	releasesDir := filepath.Join(home, "releases")
 	if err := os.MkdirAll(releasesDir, 0o755); err != nil {
 		log.Printf("subscriber: create releases dir: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 
@@ -153,21 +245,21 @@ func converge(server, home, host string, hc *http.Client) {
 	want, err := buildWantSet(tmpDir, cur.Docs)
 	if err != nil {
 		log.Printf("subscriber: invalid manifest: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 
 	os.RemoveAll(tmpDir) // best-effort: guarantee a fresh temp dir
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		log.Printf("subscriber: create temp dir: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 
-	if err := fetchAndExtractArchive(hc, server, cur.ReleaseID, tmpDir, want); err != nil {
+	if err := fetchAndExtractArchive(hc, server, token, cur.ReleaseID, tmpDir, want); err != nil {
 		os.RemoveAll(tmpDir)
 		log.Printf("subscriber: fetch/extract archive: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 
@@ -179,7 +271,7 @@ func converge(server, home, host string, hc *http.Client) {
 			msg = fmt.Sprintf("recompute content hash: %v", err)
 		}
 		log.Printf("subscriber: %s", msg)
-		heartbeat(hc, server, host, cur.ReleaseID, false, msg, false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, msg, false)
 		return
 	}
 
@@ -196,34 +288,52 @@ func converge(server, home, host string, hc *http.Client) {
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		log.Printf("subscriber: pick release dir: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 	if err := os.Rename(tmpDir, releaseDir); err != nil {
 		os.RemoveAll(tmpDir)
 		log.Printf("subscriber: install release dir: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 
 	if err := flipCorpus(home, filepath.Base(releaseDir)); err != nil {
 		log.Printf("subscriber: flip corpus symlink: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 
 	if err := writeApplied(appliedPath, curIDStr, cur.ContentHash); err != nil {
 		log.Printf("subscriber: write applied marker: %v", err)
-		heartbeat(hc, server, host, cur.ReleaseID, false, err.Error(), false)
+		heartbeat(hc, server, host, token, cur.ReleaseID, false, err.Error(), false)
 		return
 	}
 
-	heartbeat(hc, server, host, cur.ReleaseID, true, "", resyncFired)
+	heartbeat(hc, server, host, token, cur.ReleaseID, true, "", resyncFired)
 }
 
-func fetchCurrent(hc *http.Client, server, host string) (currentRelease, error) {
-	u := server + "/api/releases/current?host=" + url.QueryEscape(host)
-	resp, err := hc.Get(u)
+// apiGet issues an authenticated GET; with an empty token it is a
+// plain GET (the pre-authN loopback posture).
+func apiGet(hc *http.Client, u, token string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return hc.Do(req)
+}
+
+func fetchCurrent(hc *http.Client, server, host, token string) (currentRelease, error) {
+	// With a token the host id is resolved server-side from the token;
+	// only tokenless (pre-authN) subscribers name themselves.
+	u := server + "/api/releases/current"
+	if host != "" {
+		u += "?host=" + url.QueryEscape(host)
+	}
+	resp, err := apiGet(hc, u, token)
 	if err != nil {
 		return currentRelease{}, fmt.Errorf("GET %s: %w", u, err)
 	}
@@ -238,9 +348,9 @@ func fetchCurrent(hc *http.Client, server, host string) (currentRelease, error) 
 	return cur, nil
 }
 
-func fetchAndExtractArchive(hc *http.Client, server string, releaseID int64, destDir string, want map[string]struct{}) error {
+func fetchAndExtractArchive(hc *http.Client, server, token string, releaseID int64, destDir string, want map[string]struct{}) error {
 	u := fmt.Sprintf("%s/api/releases/%d/archive", server, releaseID)
-	resp, err := hc.Get(u)
+	resp, err := apiGet(hc, u, token)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", u, err)
 	}
@@ -436,7 +546,7 @@ func writeApplied(path, id, hash string) error {
 // heartbeat POSTs the pass outcome. It is best-effort observability:
 // every failure is logged and swallowed, never propagated, per the
 // fail-soft contract.
-func heartbeat(hc *http.Client, server, host string, releaseID int64, ok bool, errMsg string, resyncApplied bool) {
+func heartbeat(hc *http.Client, server, host, token string, releaseID int64, ok bool, errMsg string, resyncApplied bool) {
 	body := heartbeatBody{Host: host, ReleaseID: releaseID, OK: ok, ResyncApplied: resyncApplied}
 	if errMsg != "" {
 		body.Error = &errMsg
@@ -452,6 +562,9 @@ func heartbeat(hc *http.Client, server, host string, releaseID int64, ok bool, e
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		log.Printf("subscriber: heartbeat: %v", err)

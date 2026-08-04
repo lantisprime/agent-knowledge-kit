@@ -3,7 +3,9 @@
 Status: accepted direction (operator decision, 2026-08-04). This plan
 supersedes the git-transport delivery model and the separate-identity
 delivery trust boundary (`delivery-trust-boundary.md`). Implementation
-has not started; shipped code is not yet retired.
+has landed for build-order steps 1–3 (store + schema + release cut;
+thin subscriber with token-bound identity; authN); the git transport
+is not yet retired — cutover is step 7.
 
 ## Operator constraints (fixed)
 
@@ -156,7 +158,11 @@ corpus` → `releases/<id>`) → heartbeat. Idempotent; no local state
 beyond the applied release. On any failure keep the previous release
 and report the
 error. Fail-soft is preserved: an unreachable server means
-stale-but-working sessions, never broken ones.
+stale-but-working sessions, never broken ones. The subscriber
+assumes the server has auth enabled; against an auth-disabled server,
+corpus sync still works but heartbeats and force-resync are inert
+(the server treats the subscriber as the operator principal and
+ignores any host-token semantics).
 
 ## Stack
 
@@ -219,6 +225,41 @@ always `{"error": "<code>", "detail": "<text>"}`.
   flag. Response: `204`.
 - `POST /api/hosts/{host}/resync` — operator/fleet-page action; sets
   the per-host force-resync flag. Response: `204`.
+- `POST /api/hosts/{host}/token` — operator action; mints (or rotates,
+  if a token already exists) the host's bearer token. The plaintext
+  appears in this response exactly once; only its SHA-256 digest is
+  stored. Response: `201 {"host", "token"}` (token is a 64-char hex
+  string, 256 bits of entropy).
+- `DELETE /api/hosts/{host}/token` — operator action; deletes the
+  host's token — revocation is checked at request authentication,
+  so new requests with that bearer fail immediately. An
+  already-authenticated in-flight request may complete: request
+  reading is bounded by `ReadTimeout` (30 s); the release archive
+  stream has no server write bound (`WriteTimeout` is deliberately
+  0) but serves only immutable release bytes, so a post-revocation
+  completion cannot alter state or leak anything newer than the
+  already-authorized release. Response: `204`, or `404 {"error":
+  "not_found", ...}` when no token was issued.
+
+With authentication enabled (`-operator-token-file` set), every
+endpoint above requires `Authorization: Bearer <token>` on every
+request; a missing or unknown token is `401 {"error": "unauthorized",
+...}` with a `WWW-Authenticate: Bearer` challenge. Writes (docs,
+release cuts, resync, token issue/revoke) are operator-only: a host
+token on these is `403 {"error": "forbidden", ...}`. Release reads
+and heartbeats accept any valid token, with the further rule that a
+subscriber token is bound to exactly one host and *is* that host's
+identity — a mismatched `?host=` on `/api/releases/current` or a
+mismatched body `host` on `/api/heartbeats` is `403`. An empty
+`?host=` (or empty body host) resolves to the token's bound host, so
+a tokened subscriber needs no out-of-band hostname coordination. The
+request body is capped at 1 MiB by `http.MaxBytesReader`; an
+oversized payload is `413 {"error": "too_large", ...}` and is
+distinguished from a plain malformed body (`400`). The server can
+generate the operator credential itself (`-init-operator-token`,
+CSPRNG, mode 0600); a minimum length is enforced for
+hand-supplied tokens but their entropy cannot be verified — use the
+generation path.
 
 **Content-hash construction** (pinned so an independent subscriber
 reproduces it bit-for-bit from the manifest alone). Doc order is the
@@ -266,13 +307,19 @@ know the server exists.
 2. Subscriber: materialize + flip + heartbeat against a local server;
    fail-soft tests (server down, hash mismatch, partial fetch). Refuse
    `..` tar entries defensively; implement the one-line resync
-   belief-erasure read.
+   belief-erasure read. **Done** (fail-soft, traversal defense,
+   unmanifested-entry rejection, fresh-dir force-resync after tamper,
+   per-host token wiring with no `?host=` on the wire).
 3. **AuthN** — per-host subscriber token + operator credential. MUST
    land before any non-loopback bind or any remote (non-colocated)
    subscriber. Until it ships, the server refuses non-loopback binds
    (a bare `:port` counts as non-loopback) unless `--insecure-no-auth`
    is passed, and v1 subscribers are colocated or the archive travels
-   an already-authenticated channel.
+   an already-authenticated channel. **Done** (bearer auth via
+   `--operator-token-file`; per-host tokens issue/revoke;
+   token-is-identity binding on `?host=` and heartbeat body host;
+   auth+TLS gate for non-loopback binds; `MaxBytesReader` + server
+   read/idle timeouts).
 4. Curation UI: browse, edit, history, diff, publish with lints.
 5. Conflict records + merge view + resolution audit.
 6. Fleet page + force resync.
@@ -282,19 +329,22 @@ know the server exists.
 
 ## Out of scope (v1)
 
-- Multi-instance HA, Postgres, and the authN mechanism itself (it is
-  build-order step 3, not v1-server code) beyond the loopback-only
-  posture the server already enforces.
+- Multi-instance HA and Postgres remain out of scope; authN landed
+  with build-order step 3.
 - Automated claim-conflict detection.
 - Additional collections and machine-submitted streams (they need the
   additive schema changes noted in the Store section; nothing ships).
 - Environment deployment, host inventory, and consumer migration
   plans — those belong to environment repositories.
 
-### Accepted residual risks (loopback-only v1, pre-authN)
+### Accepted residual risks (loopback-only v1)
 
-Under the loopback-only posture the threat model is local processes
-only. These are accepted until authN (step 3) lands, and closed by it:
+Step 3 (AuthN) has landed. The authentication-dependent risks
+below are closed for unauthenticated and remote callers. Same-UID
+local processes can still read the operator and host token files
+(the single-user constraint is fixed), so local-process spoofing
+remains in the threat model — 0600 file modes do not isolate same-UID
+callers.
 
 - Heartbeat spoofing: any local process can overwrite any host's
   observability row.
@@ -312,6 +362,8 @@ only. These are accepted until authN (step 3) lands, and closed by it:
   recovers it; tagging acks with the applied release id is a post-authN
   refinement, not a v1 need.
 - No request-body size limit and no `http.Server` read/idle timeouts:
-  an unbounded body or a slow-loris client is a local-process DoS only.
-  `http.MaxBytesReader` and server timeouts land with the step-3
-  exposure work, before any non-loopback bind — not v1-server code.
+  an unbounded body or a slow-loris client was a local-process DoS
+  only. Both shipped with step 3: `MaxBytesReader` caps every request
+  body at 1 MiB, and the server sets `ReadHeaderTimeout` 10 s,
+  `ReadTimeout` 30 s, and `IdleTimeout` 2 m (`WriteTimeout` is left
+  zero on purpose for future long-lived response streams).

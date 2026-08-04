@@ -6,6 +6,7 @@ package store
 
 import (
 	"archive/tar"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -89,6 +90,12 @@ CREATE TABLE IF NOT EXISTS heartbeats (
 CREATE TABLE IF NOT EXISTS resync_requests (
   host         TEXT PRIMARY KEY,
   requested_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS host_tokens (
+  host       TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
 );
 `
 
@@ -455,6 +462,68 @@ func (s *Store) RequestResync(host string) error {
 		ON CONFLICT (host) DO UPDATE SET requested_at = excluded.requested_at`,
 		host, now())
 	return err
+}
+
+// IssueHostToken generates a fresh 256-bit bearer token for host and
+// stores only its SHA-256 digest; the plaintext is returned exactly
+// once and never persisted. Issuing for a host that already has a
+// token replaces it, so reissue doubles as rotation and the old token
+// stops verifying immediately.
+func (s *Store) IssueHostToken(host string) (string, error) {
+	if err := validateIdent("host", host); err != nil {
+		return "", err
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(raw[:])
+	digest := sha256.Sum256([]byte(token))
+	if _, err := s.db.Exec(`INSERT INTO host_tokens (host, token_hash, created_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT (host) DO UPDATE SET token_hash = excluded.token_hash,
+		  created_at = excluded.created_at`,
+		host, hex.EncodeToString(digest[:]), now()); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// RevokeHostToken deletes the host's token; its bearer stops verifying
+// immediately. Revoking a host with no token is ErrNotFound.
+func (s *Store) RevokeHostToken(host string) error {
+	if err := validateIdent("host", host); err != nil {
+		return err
+	}
+	res, err := s.db.Exec(`DELETE FROM host_tokens WHERE host = ?`, host)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: no token for host %q", ErrNotFound, host)
+	}
+	return nil
+}
+
+// HostForToken resolves a presented bearer token to its bound host by
+// digest lookup — plaintext tokens are never stored, and an unknown
+// token is (found=false, err=nil), not an error.
+func (s *Store) HostForToken(token string) (string, bool, error) {
+	digest := sha256.Sum256([]byte(token))
+	var host string
+	err := s.db.QueryRow(`SELECT host FROM host_tokens WHERE token_hash = ?`,
+		hex.EncodeToString(digest[:])).Scan(&host)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return host, true, nil
 }
 
 // ResyncPending reports whether a force-resync pull-flag is set for

@@ -6,19 +6,48 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"agent-knowledge-kit/knowledge-server/store"
 )
 
 func main() {
 	dbPath := flag.String("db", "knowledge.db", "path to the SQLite database")
-	listen := flag.String("listen", "127.0.0.1:8471", "listen address (loopback unless --insecure-no-auth)")
+	listen := flag.String("listen", "127.0.0.1:8471", "listen address (loopback unless auth+TLS are enabled or --insecure-no-auth)")
+	operatorTokenFile := flag.String("operator-token-file", "",
+		"path to the operator bearer token; setting it enables authentication on every endpoint. Must be at least 32 characters; generate with e.g. openssl rand -hex 32")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate (PEM); with -tls-key, the server serves HTTPS")
+	tlsKey := flag.String("tls-key", "", "TLS private key (PEM); must be set together with -tls-cert")
 	insecureNoAuth := flag.Bool("insecure-no-auth", false,
-		"allow binding a non-loopback address without authentication. DANGER: do not enable on a network-reachable host before the authN slice lands.")
+		"allow binding a non-loopback address without authentication and TLS. DANGER: exposes an unauthenticated write API to the network.")
+	initOperator := flag.Bool("init-operator-token", false,
+		"with -operator-token-file, generate a fresh operator credential (CSPRNG, 64 hex chars, mode 0600) when the file is missing; refuses to overwrite an existing file")
 	flag.Parse()
 
-	if err := checkListenAddr(*listen, *insecureNoAuth); err != nil {
-		log.Fatalf("%v (pass --insecure-no-auth to override)", err)
+	if (*tlsCert == "") != (*tlsKey == "") {
+		log.Fatal("-tls-cert and -tls-key must be set together")
+	}
+	if *initOperator && *operatorTokenFile == "" {
+		log.Fatal("-init-operator-token requires -operator-token-file")
+	}
+
+	auth, err := bootstrapOperatorToken(*operatorTokenFile, *initOperator)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	// -init-operator-token is a one-shot provisioning verb: generate,
+	// report, exit. Serving anyway would leave the flag armed in a
+	// service unit, and the next restart would fatal on O_EXCL.
+	if *initOperator {
+		log.Printf("generated operator token at %s (mode 0600); restart without -init-operator-token to serve", *operatorTokenFile)
+		return
+	}
+
+	// A non-loopback bind requires BOTH auth and TLS: a bearer token on
+	// plaintext HTTP is sniffable, which would defeat the token.
+	secured := auth != nil && *tlsCert != ""
+	if err := checkListenAddr(*listen, secured, *insecureNoAuth); err != nil {
+		log.Fatalf("%v (enable -operator-token-file and TLS, or pass --insecure-no-auth to override)", err)
 	}
 
 	st, err := store.Open(*dbPath)
@@ -27,24 +56,39 @@ func main() {
 	}
 	defer st.Close()
 
-	log.Printf("knowledge-server listening on %s (db %s)", *listen, *dbPath)
-	log.Fatal(http.ListenAndServe(*listen, newMux(st)))
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           newMux(st, auth),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		// WriteTimeout is deliberately zero: it would sever long-lived
+		// response streams — the release archive on a slow link today,
+		// the SSE release stream when it lands.
+	}
+	log.Printf("knowledge-server listening on %s (db %s, auth %v, tls %v)",
+		*listen, *dbPath, auth != nil, *tlsCert != "")
+	if *tlsCert != "" {
+		log.Fatal(srv.ListenAndServeTLS(*tlsCert, *tlsKey))
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
-// checkListenAddr enforces the v1 loopback-only posture. The default
-// 127.0.0.1:8471 is a footgun-free default; non-loopback binds are
-// refused unless the operator passes --insecure-no-auth, which is
+// checkListenAddr gates network exposure. Loopback binds are always
+// allowed (the pre-authN colocated posture). A non-loopback bind is
+// allowed only when the server is secured (auth AND TLS enabled) or
+// the operator explicitly overrides with --insecure-no-auth, which is
 // logged so the choice is auditable.
-func checkListenAddr(addr string, insecureNoAuth bool) error {
+func checkListenAddr(addr string, secured, insecureNoAuth bool) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("invalid -listen address %q: %v", addr, err)
 	}
-	if insecureNoAuth {
+	if secured || insecureNoAuth {
 		return nil
 	}
 	if !isLoopbackHost(host) {
-		return fmt.Errorf("refusing non-loopback bind on %s", addr)
+		return fmt.Errorf("refusing non-loopback bind on %s without auth+TLS", addr)
 	}
 	return nil
 }
@@ -52,8 +96,8 @@ func checkListenAddr(addr string, insecureNoAuth bool) error {
 // isLoopbackHost treats the documented loopback shapes as loopback:
 // the literal "localhost" string, IPv4 127.0.0.0/8, and IPv6 ::1. An
 // empty host (a bare ":port") is NOT loopback: Go's net package binds
-// it to every interface, so it must be refused unless the operator has
-// explicitly opted in with --insecure-no-auth.
+// it to every interface, so it must be refused unless the server is
+// secured or the operator has explicitly opted in.
 func isLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true

@@ -3,6 +3,8 @@ package store
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"path/filepath"
@@ -394,4 +396,121 @@ func TestResyncFlow(t *testing.T) {
 	if pending, err := s.ResyncPending("h1"); err != nil || !pending {
 		t.Fatalf("ok=false must not clear: pending=%v err=%v", pending, err)
 	}
+}
+
+// TestIssueHostTokenShape — the returned plaintext is a 64-char hex
+// string (256 bits of entropy) and is NOT equal to the stored digest.
+func TestIssueHostTokenShape(t *testing.T) {
+	s := open(t)
+	tok, err := s.IssueHostToken("h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tok) != 64 {
+		t.Fatalf("token len = %d, want 64", len(tok))
+	}
+	if _, err := hex.DecodeString(tok); err != nil {
+		t.Fatalf("token is not hex: %v", err)
+	}
+	// The stored row is the SHA-256 digest of the plaintext, not the
+	// plaintext itself — verify against an independently computed hash.
+	digest := sha256Hex(tok)
+	var stored string
+	if err := s.db.QueryRow(`SELECT token_hash FROM host_tokens WHERE host = 'h1'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != digest {
+		t.Fatalf("stored hash = %q, want SHA-256 of plaintext %q", stored, digest)
+	}
+	if tok == digest {
+		t.Fatalf("plaintext must not equal its digest")
+	}
+}
+
+// TestHostForToken resolves the bound host and treats unknown tokens
+// as found=false, err=nil (callers map that to 401, not 500).
+func TestHostForToken(t *testing.T) {
+	s := open(t)
+	tok, err := s.IssueHostToken("h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, ok, err := s.HostForToken(tok)
+	if err != nil || !ok || host != "h1" {
+		t.Fatalf("resolve issued: host=%q ok=%v err=%v", host, ok, err)
+	}
+	host, ok, err = s.HostForToken("not-a-real-token")
+	if err != nil || ok || host != "" {
+		t.Fatalf("unknown token: host=%q ok=%v err=%v, want ok=false err=nil", host, ok, err)
+	}
+}
+
+// TestIssueHostTokenRotation — reissuing for a host replaces the
+// stored digest; the old plaintext stops verifying, the new one works.
+func TestIssueHostTokenRotation(t *testing.T) {
+	s := open(t)
+	old, err := s.IssueHostToken("h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTok, err := s.IssueHostToken("h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old == newTok {
+		t.Fatalf("reissue must yield a fresh token")
+	}
+	if host, ok, err := s.HostForToken(old); err != nil || ok {
+		t.Fatalf("old token must stop resolving: host=%q ok=%v err=%v", host, ok, err)
+	}
+	host, ok, err := s.HostForToken(newTok)
+	if err != nil || !ok || host != "h1" {
+		t.Fatalf("new token must resolve h1: host=%q ok=%v err=%v", host, ok, err)
+	}
+}
+
+// TestRevokeHostToken — deleting the row makes the bearer stop
+// verifying; revoking an absent host is ErrNotFound (errors.Is).
+func TestRevokeHostToken(t *testing.T) {
+	s := open(t)
+	tok, err := s.IssueHostToken("h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeHostToken("h1"); err != nil {
+		t.Fatal(err)
+	}
+	if host, ok, err := s.HostForToken(tok); err != nil || ok {
+		t.Fatalf("after revoke: host=%q ok=%v err=%v, want ok=false", host, ok, err)
+	}
+	if err := s.RevokeHostToken("h1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoke absent: want ErrNotFound, got %v", err)
+	}
+	if err := s.RevokeHostToken("never-issued"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoke never-issued: want ErrNotFound, got %v", err)
+	}
+}
+
+// TestIssueHostTokenInvalidHost — the path-safe ident guard from
+// validateIdent applies to host tokens too: empty and any '..' shape
+// is rejected up front, before any token is generated or stored.
+func TestIssueHostTokenInvalidHost(t *testing.T) {
+	s := open(t)
+	if _, err := s.IssueHostToken(""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty host: want ErrInvalid, got %v", err)
+	}
+	if _, err := s.IssueHostToken("../evil"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("'..' host: want ErrInvalid, got %v", err)
+	}
+	if err := s.RevokeHostToken("../evil"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("revoke '..' host: want ErrInvalid, got %v", err)
+	}
+}
+
+// sha256Hex is a tiny test helper so the shape test can express the
+// "stored digest is SHA-256 of the plaintext" invariant without
+// inlining the import in the test body.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
