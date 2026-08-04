@@ -62,19 +62,43 @@ collections:
 | feedback / behavioral patterns | agent-proposed, human-confirmed | pushed or trigger-loaded | promoted from episodes |
 | research notes | agents, API | query-on-demand | source staleness checks |
 
-v1 ships the curated collections (kernel, procedure docs); the schema
-anticipates the rest without redesign. Only push-tier collections
-enter the release snapshot subscribers materialize.
+v1 ships the curated collections (kernel, procedure docs). The
+non-v1 columns of the table above are the *target*, not what v1's
+schema already holds: `collections` currently carries a `delivery`
+policy and an `in_release` membership flag, so per-collection
+write-path and lifecycle rules, the "draft referenced by an active
+doc" reference lint, and promotion provenance each need an
+**additive** schema change when their slice lands (e.g.
+`collections.write_path`, `collections.lifecycle`, a `doc_links`
+table, a `provenance` column on `doc_versions`). These are additive —
+no rewrite of shipped tables — but they are not free. Release
+membership is the `in_release` flag, not the delivery tier: v1 seeds
+both `kernel` (push) and `docs` (trigger) with `in_release = 1`,
+because Tier B procedure docs must be materialized on the host to be
+trigger-loaded. Query-tier collections are not in the snapshot.
 
 - A document row carries the schema fields (`family-id`, `version`,
   `title`, `status`, `owner`, `audience`, `tier`, `triggers`, body)
   plus timestamps and editor identity. Every save is a new immutable
   version row; supersession is a status change, never a delete.
+- The store is the trust boundary: `collection` and `family` are
+  validated at `SaveDoc` before any path is built from them — empty,
+  a leading `.`, `/`, `\`, a `..` substring, NUL, an ASCII control
+  char, or any non-ASCII byte is rejected (they become tar entry
+  paths at release time; the identifier set is deliberately narrow).
+- Writes are serialized in-process (WAL + a single SQLite connection),
+  so concurrent saves cannot collide on `SQLITE_BUSY`. An optional
+  `base_version` on a save is an optimistic-lock base: a stale value
+  is rejected (409) rather than silently overwriting; omitting it is
+  the explicit last-writer-wins opt-out.
 - Lifecycle is enforced by the database, not convention: `draft` never
   enters a release; exactly one `active` version per family.
-- Promotion across collections is a first-class UI action: an episode
-  that proves durable becomes a behavioral pattern or Tier B doc, with
-  provenance links back to its source episodes.
+- Kernel release lint is two-door at cut time: the ~2000-word Tier A
+  cap AND a hard `24576`-byte (24 KiB) backstop, so a whitespace- or
+  zero-width-joined body that fools the word count still cannot ship.
+- Promotion across collections is a first-class UI action (post-v1,
+  needs the provenance column above): an episode that proves durable
+  becomes a behavioral pattern or Tier B doc, linked to its sources.
 
 ### Web curation UI
 
@@ -105,9 +129,23 @@ conflicted, both versions, who resolved it, the winning version, when.
 ### Consumer host registry
 
 - Subscribers heartbeat `{host id, applied release, timestamp, last
-  error}`.
+  error}`. Heartbeats are observability only — a last-seen row per
+  host, never delivery or routing state.
 - Fleet page: which hosts are current, stale, or dark; per-host error
   detail; a force-resync action.
+- **Force-resync (belief-erasure pull-flag).** Force-resync keeps the
+  thin-client boundary: all intent is server-side in a dedicated
+  `resync_requests(host, requested_at)` table, set by `POST
+  /api/hosts/{host}/resync` and surviving restarts and offline hosts.
+  The subscriber gains no logic — on its poll it reads `resync` from
+  `GET /api/releases/current?host=<h>`; if true it deletes its local
+  applied-release marker (its only permitted state) and the existing
+  "applied != current → re-materialize with hash verification" path
+  does the rest. The flag clears only on the post-apply heartbeat
+  (`ok && resync_applied`), never on poll or on convergence, so an
+  offline or crashed host retries on next boot. Delivery is
+  at-least-once over an idempotent apply. (Server side ships in v1;
+  the one-line client behavior is step-2 subscriber work.)
 
 ## Subscriber contract
 
@@ -139,25 +177,137 @@ stale-but-working sessions, never broken ones.
 - "Kernel edits are PR-only" becomes: kernel edits go through the web
   UI's diff-and-confirm publish with the cap lint enforced.
 
+## Component boundaries and contracts
+
+Each component has one responsibility, a declared input/output schema,
+and an explicit non-goal. Nothing crosses a boundary except these
+messages.
+
+**Store (SQLite).** Consumes validated writes from the API layer only;
+produces rows and release snapshots. No other process or component
+opens the database file. Never: parse HTTP, render UI, talk to hosts.
+
+**HTTP API — the only write door.** All schemas are JSON; errors are
+always `{"error": "<code>", "detail": "<text>"}`.
+
+- `PUT /api/docs/{collection}/{family}` — save a new doc version.
+  Request: `{"title", "status": "draft|active", "tier", "triggers":
+  [..], "owner", "audience", "body", "base_version"?}`. `base_version`
+  is optional; when present and it does not equal the family's current
+  max version, the save is rejected `409 {"error": "conflict", ...}`.
+  Response: `{"collection", "family_id", "version", "status",
+  "created_at", "editor"}`.
+- `POST /api/releases` — cut a release from active docs; publish
+  lints run here and reject with `409 {"error": "lint", ...}`.
+  Response (the release manifest): `{"release_id", "content_hash":
+  "sha256:..", "created_at", "docs": [{"path", "family_id",
+  "version", "sha256"}]}`.
+- `GET /api/releases/current[?host=<h>]` — latest manifest, same
+  schema; with `?host=<h>` a *pending* force-resync flag adds
+  `"resync": true` (see the registry). The field is `omitempty`: a
+  false/absent flag omits it entirely, so clients must read absent as
+  false.
+- `GET /api/releases/{id}/archive` — tar stream; entry paths exactly
+  match the manifest `path` fields. A missing id is `404 {"error":
+  "not_found", ...}` (checked before any tar byte is written), never a
+  200 with an empty body.
+- `POST /api/heartbeats` — `{"host", "release_id", "ok",
+  "error": null|"<text>", "resync_applied"?}`. `resync_applied: true`
+  with `ok: true` is the sole signal that clears this host's resync
+  flag. Response: `204`.
+- `POST /api/hosts/{host}/resync` — operator/fleet-page action; sets
+  the per-host force-resync flag. Response: `204`.
+
+**Content-hash construction** (pinned so an independent subscriber
+reproduces it bit-for-bit from the manifest alone). Doc order is the
+release query order `ORDER BY collection, family_id`, and the manifest
+lists docs in exactly that order. Start a SHA-256; for each doc in
+order write its `path` bytes, then a single `0x00` byte, then the raw
+32-byte SHA-256 of the doc body (not hex). `content_hash` is
+`"sha256:" + hex(sum)`. The per-doc `sha256` in the manifest is that
+same digest in hex. The archive tar bytes are NOT what `content_hash`
+covers — a subscriber recomputes the hash from the materialized
+`path`+body set, not from the tar framing.
+
+**Release stream (SSE).** Output-only: emits `{"release_id",
+"content_hash"}` per cut release. Fire-and-forget broadcast — the
+server keeps no per-client state: no offsets, no acknowledgements, no
+replay. A client that misses events converges by reading
+`/api/releases/current`; only the latest release matters. Never:
+carry document bodies, accept writes, or track who is listening.
+
+**Web UI.** A client of the HTTP API with no privileged path — it
+uses the same endpoints and schemas as any other client. Never: touch
+the store directly.
+
+**Subscriber.** An asynchronous convergence loop: on a release event,
+on stream reconnect, and on a slow periodic poll, compare the
+server's current release to the locally applied one; if they differ,
+fetch, verify, apply. Idempotent — applying the same release twice is
+a no-op; there is no replay and nothing to acknowledge. Its whole
+output surface on the host is: versioned release dirs, the atomic
+`current` pointer, one heartbeat POST. Never: write knowledge, merge,
+or mutate a delivered release.
+
+**Adapters (existing, unchanged).** Consume files below
+`$KNOWLEDGE_HOME/corpus`; produce harness-native injection. Never:
+know the server exists.
+
 ## Build order (v1)
 
 1. Store + schema + release cut (server, API only): publish a fixture
-   corpus; regression tests.
+   corpus; regression tests. **Done** (path validation, serialized
+   writes + optimistic lock, two-door kernel lint, release/archive/
+   heartbeat/resync endpoints, loopback enforcement).
 2. Subscriber: materialize + flip + heartbeat against a local server;
-   fail-soft tests (server down, hash mismatch, partial fetch).
-3. Curation UI: browse, edit, history, diff, publish with lints.
-4. Conflict records + merge view + resolution audit.
-5. Fleet page + force resync.
-6. Cutover: adapters read the subscriber-materialized corpus (no
+   fail-soft tests (server down, hash mismatch, partial fetch). Refuse
+   `..` tar entries defensively; implement the one-line resync
+   belief-erasure read.
+3. **AuthN** — per-host subscriber token + operator credential. MUST
+   land before any non-loopback bind or any remote (non-colocated)
+   subscriber. Until it ships, the server refuses non-loopback binds
+   (a bare `:port` counts as non-loopback) unless `--insecure-no-auth`
+   is passed, and v1 subscribers are colocated or the archive travels
+   an already-authenticated channel.
+4. Curation UI: browse, edit, history, diff, publish with lints.
+5. Conflict records + merge view + resolution audit.
+6. Fleet page + force resync.
+7. Cutover: adapters read the subscriber-materialized corpus (no
    adapter change expected); retire the git transport; update
    `architecture.md`, `REPO_MAP.md`, README.
 
 ## Out of scope (v1)
 
-- Multi-instance HA, Postgres, authentication beyond one operator
-  account and per-host subscriber tokens.
+- Multi-instance HA, Postgres, and the authN mechanism itself (it is
+  build-order step 3, not v1-server code) beyond the loopback-only
+  posture the server already enforces.
 - Automated claim-conflict detection.
-- Additional collections and machine-submitted streams (the schema
-  anticipates them; nothing ships).
+- Additional collections and machine-submitted streams (they need the
+  additive schema changes noted in the Store section; nothing ships).
 - Environment deployment, host inventory, and consumer migration
   plans — those belong to environment repositories.
+
+### Accepted residual risks (loopback-only v1, pre-authN)
+
+Under the loopback-only posture the threat model is local processes
+only. These are accepted until authN (step 3) lands, and closed by it:
+
+- Heartbeat spoofing: any local process can overwrite any host's
+  observability row.
+- Force-resync abuse: a forged `POST /api/hosts/{host}/resync` only
+  triggers a redundant re-apply of authentic, hash-verified content —
+  availability noise, never an integrity break.
+- Forged resync ack: a spoofed `resync_applied` heartbeat can make a
+  resync appear done when it was withheld; the fleet page shows
+  `requested_at` vs the ack time so the anomaly is at least visible.
+  The completion signal is trustworthy only post-authN.
+- Stale-ack clear: because set and clear are serialized but untagged,
+  an in-flight `ok && resync_applied` heartbeat acking a *previous*
+  request can clear a just-set flag. The apply is idempotent (the host
+  re-materialized the current release moments earlier) and a re-request
+  recovers it; tagging acks with the applied release id is a post-authN
+  refinement, not a v1 need.
+- No request-body size limit and no `http.Server` read/idle timeouts:
+  an unbounded body or a slow-loris client is a local-process DoS only.
+  `http.MaxBytesReader` and server timeouts land with the step-3
+  exposure work, before any non-loopback bind — not v1-server code.
