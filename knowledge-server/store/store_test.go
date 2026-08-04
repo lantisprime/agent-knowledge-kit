@@ -82,6 +82,8 @@ func TestSaveDocValidateIdent(t *testing.T) {
 		{"family backslash", "docs", `back\slash`},
 		{"family NUL byte", "docs", "nul\x00byte"},
 		{"family control byte", "docs", "ctrl\x01byte"},
+		{"family non-ASCII", "docs", "café"},
+		{"family invalid UTF-8", "docs", "bad\xffbyte"},
 		{"collection with slash", "doc/s", "ok"},
 		{"collection backslash", `doc\s`, "ok"},
 		{"collection leading dot", ".bad", "ok"},

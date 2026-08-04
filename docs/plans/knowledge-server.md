@@ -151,8 +151,10 @@ conflicted, both versions, who resolved it, the winning version, when.
 
 Receive "release N exists" (stream push; poll fallback) → fetch N →
 verify content hash → write to a fresh versioned dir → atomically flip
-`current` → heartbeat. Idempotent; no local state beyond the applied
-release. On any failure keep the previous release and report the
+the `corpus` pointer (the symlink adapters read; `$KNOWLEDGE_HOME/
+corpus` → `releases/<id>`) → heartbeat. Idempotent; no local state
+beyond the applied release. On any failure keep the previous release
+and report the
 error. Fail-soft is preserved: an unreachable server means
 stale-but-working sessions, never broken ones.
 
@@ -246,8 +248,10 @@ server's current release to the locally applied one; if they differ,
 fetch, verify, apply. Idempotent — applying the same release twice is
 a no-op; there is no replay and nothing to acknowledge. Its whole
 output surface on the host is: versioned release dirs, the atomic
-`current` pointer, one heartbeat POST. Never: write knowledge, merge,
-or mutate a delivered release.
+`corpus` symlink pointer, one heartbeat POST. Never: write knowledge,
+merge, or mutate a delivered release. A force-resync always
+re-materializes from freshly-fetched, hash-verified bytes into a new
+release dir — it never reuses an on-disk dir that could have drifted.
 
 **Adapters (existing, unchanged).** Consume files below
 `$KNOWLEDGE_HOME/corpus`; produce harness-native injection. Never:

@@ -14,7 +14,6 @@ import (
 	"io"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -180,15 +179,12 @@ func validateIdent(field, value string) error {
 		if r == 0 || r < 0x20 || r == 0x7f {
 			return fmt.Errorf("%w: %s %q contains control byte", ErrInvalid, field, value)
 		}
-		// Identifiers are ASCII by contract; a non-ASCII rune is
-		// rejected as a control byte by the range check above would
-		// not catch it, so add an explicit non-ASCII guard.
+		// Identifiers are ASCII by contract; a non-ASCII rune would
+		// not be caught by the control-byte check above, so add an
+		// explicit non-ASCII guard here.
 		if r > 0x7f {
 			return fmt.Errorf("%w: %s %q is not ASCII", ErrInvalid, field, value)
 		}
-	}
-	if !utf8.ValidString(value) {
-		return fmt.Errorf("%w: %s %q is not valid UTF-8", ErrInvalid, field, value)
 	}
 	return nil
 }

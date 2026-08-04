@@ -85,7 +85,9 @@ func (a *api) currentRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Optional ?host=<h> adds the per-host resync pull-flag to the
-	// response. Absent host means the field is omitted (omitempty).
+	// response. The field is omitempty: it is omitted whenever false,
+	// whether because host is absent (m.Resync keeps its zero value)
+	// or because host is present but no resync is pending.
 	if host := r.URL.Query().Get("host"); host != "" {
 		pending, err := a.st.ResyncPending(host)
 		if err != nil {
