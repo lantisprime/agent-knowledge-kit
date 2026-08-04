@@ -1,0 +1,6 @@
+# Local runtime state and build output — never committed.
+*.db
+*.db-shm
+*.db-wal
+/knowledge-server
+/ks
