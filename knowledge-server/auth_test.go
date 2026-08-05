@@ -20,8 +20,8 @@ import (
 // both lookup paths (issue/revoke, digest resolution, resync flags).
 // Per-endpoint tests build one of these and use its helpers.
 type authFixture struct {
-	s       *store.Store
-	ts      *httptest.Server
+	s        *store.Store
+	ts       *httptest.Server
 	operator string
 }
 
@@ -117,7 +117,7 @@ func (f *authFixture) do(t *testing.T, method, path, token string, body any) (*h
 	return resp, buf
 }
 
-func (f *authFixture) opsToken() string  { return f.operator }
+func (f *authFixture) opsToken() string { return f.operator }
 func (f *authFixture) issueToken(t *testing.T, host string) string {
 	t.Helper()
 	resp, body := f.do(t, http.MethodPost, "/api/hosts/"+host+"/token", f.opsToken(), nil)
@@ -148,9 +148,9 @@ func (f *authFixture) issueToken(t *testing.T, host string) string {
 // surface as an error.
 func TestLoadOperatorTokenTrims(t *testing.T) {
 	cases := []struct {
-		name    string
+		name     string
 		contents string
-		wantErr bool
+		wantErr  bool
 	}{
 		{"plain", "secret-token-aaaaaaaaaaaaaaaaaaaaa", false},
 		{"trailing newline", "secret-token-aaaaaaaaaaaaaaaaaaaaa\n", false},
@@ -227,11 +227,11 @@ func TestLoadOperatorTokenMinLength(t *testing.T) {
 // the host token cannot invalidate the others' host tokens.
 func TestAuthMatrix(t *testing.T) {
 	type call struct {
-		name       string
-		method     string
-		path       string
-		body       any
-		opOnly     bool
+		name   string
+		method string
+		path   string
+		body   any
+		opOnly bool
 	}
 	calls := []call{
 		{"save doc", http.MethodPut, "/api/docs/docs/runbook", map[string]any{"status": "draft", "body": "x"}, true},

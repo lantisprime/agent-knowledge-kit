@@ -81,16 +81,16 @@ type heartbeatCapture struct {
 // serving canned /api/releases/current, /api/releases/{id}/archive, and
 // /api/heartbeats responses so these tests need no real server.
 type fakeServer struct {
-	mu               sync.Mutex
-	current          currentRelease
-	archives         map[int64][]byte
-	archiveHits      map[int64]int
-	heartbeats       []heartbeatCapture
-	requireToken     string         // when non-empty, every handler 401s unless Authorization matches
-	hostQueries      []string       // ?host= values seen on /current, in arrival order ("" when absent)
-	authorizedHits   map[string]int // endpoint key ("current","archive","heartbeat") -> count of authorized requests
-	redirectOnCurrent bool          // when true, /current returns 302 to /sentinel (FIX 1 redirect-refusal test)
-	sentinelHits     int            // hits on /sentinel, used to assert the redirect is refused client-side
+	mu                sync.Mutex
+	current           currentRelease
+	archives          map[int64][]byte
+	archiveHits       map[int64]int
+	heartbeats        []heartbeatCapture
+	requireToken      string         // when non-empty, every handler 401s unless Authorization matches
+	hostQueries       []string       // ?host= values seen on /current, in arrival order ("" when absent)
+	authorizedHits    map[string]int // endpoint key ("current","archive","heartbeat") -> count of authorized requests
+	redirectOnCurrent bool           // when true, /current returns 302 to /sentinel (FIX 1 redirect-refusal test)
+	sentinelHits      int            // hits on /sentinel, used to assert the redirect is refused client-side
 }
 
 func newFakeServer() *fakeServer {
