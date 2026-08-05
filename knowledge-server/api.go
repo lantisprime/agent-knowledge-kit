@@ -10,7 +10,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"agent-knowledge-kit/knowledge-server/store"
 )
@@ -29,6 +31,10 @@ func newMux(st *store.Store, auth *authState) *http.ServeMux {
 	a := &api{st: st, auth: auth}
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/docs/{collection}/{family}", a.secure(true, a.saveDoc))
+	mux.HandleFunc("GET /api/docs", a.secure(true, a.listDocs))
+	mux.HandleFunc("GET /api/docs/{collection}/{family}", a.secure(true, a.getDoc))
+	mux.HandleFunc("GET /api/docs/{collection}/{family}/versions", a.secure(true, a.docHistory))
+	mux.HandleFunc("GET /api/releases/preview", a.secure(true, a.previewRelease))
 	mux.HandleFunc("POST /api/releases", a.secure(true, a.cutRelease))
 	mux.HandleFunc("GET /api/releases/current", a.secure(false, a.currentRelease))
 	mux.HandleFunc("GET /api/releases/{id}/archive", a.secure(false, a.archive))
@@ -36,11 +42,18 @@ func newMux(st *store.Store, auth *authState) *http.ServeMux {
 	mux.HandleFunc("POST /api/hosts/{host}/resync", a.secure(true, a.requestResync))
 	mux.HandleFunc("POST /api/hosts/{host}/token", a.secure(true, a.issueToken))
 	mux.HandleFunc("DELETE /api/hosts/{host}/token", a.secure(true, a.revokeToken))
+	registerUI(mux)
 	return mux
 }
 
+// writeJSON sets the hardening headers that pin the curation UI's
+// cache/no-sniff contract on EVERY JSON response (success and error),
+// then writes the encoded value. The archive handler does not go
+// through writeJSON and is unaffected.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
 }
@@ -97,6 +110,44 @@ func decodeBody(r *http.Request, v any) error {
 	return fmt.Errorf("%w: trailing data after JSON body", store.ErrInvalid)
 }
 
+// decodeOptionalBody is decodeBody's variant for routes where the body
+// is optional (e.g. POST /api/releases: empty body means "unconditional
+// cut"). The "empty" decision is made by the decoder: a FIRST Decode
+// returning io.EOF means no JSON value was present (this also covers
+// a whitespace-only body, which is fine for the cut path). Every
+// other path keeps decodeBody's exact semantics: cap hit → 413,
+// malformed JSON → 400, trailing data after one JSON value → 400/413.
+// Returns false when the body was empty, true when a value decoded.
+func decodeOptionalBody(r *http.Request, v any) (bool, error) {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return false, fmt.Errorf("%w: body exceeds %d bytes", errTooLarge, mbe.Limit)
+		}
+		return false, fmt.Errorf("%w: bad JSON: %v", store.ErrInvalid, err)
+	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != nil {
+		if errors.Is(err, io.EOF) {
+			return true, nil
+		}
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return true, fmt.Errorf("%w: body exceeds %d bytes", errTooLarge, mbe.Limit)
+		}
+		return true, fmt.Errorf("%w: trailing data after JSON body", store.ErrInvalid)
+	}
+	return true, fmt.Errorf("%w: trailing data after JSON body", store.ErrInvalid)
+}
+
+// hashPattern is the exact wire shape of expected_content_hash on the
+// cut release body: "sha256:" + 64 lowercase hex chars.
+const hashPattern = `^sha256:[0-9a-f]{64}$`
+
 func (a *api) saveDoc(w http.ResponseWriter, r *http.Request) {
 	var in store.DocSave
 	if err := decodeBody(r, &in); err != nil {
@@ -116,12 +167,98 @@ func (a *api) saveDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) cutRelease(w http.ResponseWriter, r *http.Request) {
-	m, err := a.st.CutRelease()
+	// Body shape:
+	//   empty (or whitespace-only) → unconditional cut (legacy)
+	//   any JSON object → expected_content_hash is mandatory; a
+	//     missing, null, empty, or malformed value is 400 invalid
+	//     and NO release is cut (the zero value must never silently
+	//     become an unconditional cut).
+	var in struct {
+		ExpectedContentHash *string `json:"expected_content_hash"`
+	}
+	hadBody, err := decodeOptionalBody(r, &in)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	expected := ""
+	if hadBody {
+		if in.ExpectedContentHash == nil {
+			writeErr(w, fmt.Errorf("%w: expected_content_hash is required", store.ErrInvalid))
+			return
+		}
+		if !regexp.MustCompile(hashPattern).MatchString(*in.ExpectedContentHash) {
+			writeErr(w, fmt.Errorf("%w: expected_content_hash must be %q", store.ErrInvalid, "sha256:"+strings.Repeat("[0-9a-f]", 64)))
+			return
+		}
+		expected = *in.ExpectedContentHash
+	}
+	m, err := a.st.CutRelease(expected)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, m)
+}
+
+// listDocs returns one DocMeta per family: the max-version row of
+// that family. The store is required to return a non-nil empty slice
+// for an empty store so the wire form is "[]", never "null".
+func (a *api) listDocs(w http.ResponseWriter, r *http.Request) {
+	docs, err := a.st.ListDocs()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"docs": docs})
+}
+
+// getDoc returns one Doc. Optional ?version=N: detect presence with
+// Has("version") (first value wins if repeated); when present, parse
+// even the empty string — empty, non-numeric, < 1, or overflow → 400
+// invalid. Absent → latest.
+func (a *api) getDoc(w http.ResponseWriter, r *http.Request) {
+	collection := r.PathValue("collection")
+	family := r.PathValue("family")
+	version := 0
+	if r.URL.Query().Has("version") {
+		raw := r.URL.Query().Get("version")
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			writeErr(w, fmt.Errorf("%w: ?version must be a positive integer", store.ErrInvalid))
+			return
+		}
+		version = n
+	}
+	doc, err := a.st.GetDoc(collection, family, version)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, doc)
+}
+
+// docHistory returns every version of one family, newest first.
+// Unknown family → 404 from the store's ErrNotFound mapping.
+func (a *api) docHistory(w http.ResponseWriter, r *http.Request) {
+	versions, err := a.st.DocHistory(r.PathValue("collection"), r.PathValue("family"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
+}
+
+// previewRelease returns the would-be release manifest with
+// ReleaseID == 0. Lint failures surface as 409 via the existing
+// ErrLint mapping.
+func (a *api) previewRelease(w http.ResponseWriter, r *http.Request) {
+	m, err := a.st.PreviewRelease()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
 }
 
 func (a *api) currentRelease(w http.ResponseWriter, r *http.Request) {

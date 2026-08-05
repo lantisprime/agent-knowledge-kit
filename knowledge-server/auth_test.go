@@ -45,7 +45,13 @@ func newAuthedFixtureWith(t *testing.T, operator string, seedRelease bool) *auth
 		if _, err := s.SaveDoc("kernel", "kernel", store.DocSave{Status: "active", Body: "rules"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CutRelease(); err != nil {
+		// Seed a docs/runbook family so the step-4 auth-matrix entries
+		// that target it (get_doc, doc_history) hit a known resource
+		// and pass the existing "valid token → 2xx" assertion.
+		if _, err := s.SaveDoc("docs", "runbook", store.DocSave{Status: "draft", Body: "x"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CutRelease(""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -73,7 +79,7 @@ func newUnauthFixture(t *testing.T, seedRelease bool) *httptest.Server {
 		if _, err := s.SaveDoc("kernel", "kernel", store.DocSave{Status: "active", Body: "rules"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CutRelease(); err != nil {
+		if _, err := s.CutRelease(""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -242,6 +248,12 @@ func TestAuthMatrix(t *testing.T) {
 		{"get current", http.MethodGet, "/api/releases/current", nil, false},
 		{"get archive", http.MethodGet, "/api/releases/1/archive", nil, false},
 		{"heartbeat", http.MethodPost, "/api/heartbeats", map[string]any{"ok": true}, false},
+		// Step-4 curation surface: every list / fetch / preview /
+		// cut-with-precondition route is operator-only.
+		{"list docs", http.MethodGet, "/api/docs", nil, true},
+		{"get doc", http.MethodGet, "/api/docs/docs/runbook", nil, true},
+		{"doc history", http.MethodGet, "/api/docs/docs/runbook/versions", nil, true},
+		{"release preview", http.MethodGet, "/api/releases/preview", nil, true},
 	}
 	for _, c := range calls {
 		t.Run(c.name, func(t *testing.T) {
