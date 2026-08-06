@@ -3,9 +3,9 @@
 Status: accepted direction (operator decision, 2026-08-04). This plan
 supersedes the git-transport delivery model and the separate-identity
 delivery trust boundary (`delivery-trust-boundary.md`). Implementation
-has landed for build-order steps 1–3 (store + schema + release cut;
-thin subscriber with token-bound identity; authN); the git transport
-is not yet retired — cutover is step 7.
+has landed for build-order steps 1–4 (store + schema + release cut;
+thin subscriber with token-bound identity; authN; embedded curation
+UI); the git transport is not yet retired — cutover is step 7.
 
 ## Operator constraints (fixed)
 
@@ -207,9 +207,28 @@ always `{"error": "<code>", "detail": "<text>"}`.
   "created_at", "editor"}`.
 - `POST /api/releases` — cut a release from active docs; publish
   lints run here and reject with `409 {"error": "lint", ...}`.
+  An empty request body cuts unconditionally; any JSON body makes the
+  precondition mandatory: `{"expected_content_hash": "sha256:" + 64
+  lowercase hex}` (missing/empty/malformed → `400 invalid`, nothing
+  cut) and a candidate whose hash no longer matches → `409
+  {"error": "conflict", ...}`, nothing cut. Candidate computation,
+  hash check, and insert run in one store transaction.
   Response (the release manifest): `{"release_id", "content_hash":
   "sha256:..", "created_at", "docs": [{"path", "family_id",
   "version", "sha256"}]}`.
+- `GET /api/docs`, `GET /api/docs/{collection}/{family}[?version=N]`,
+  `GET /api/docs/{collection}/{family}/versions` — operator-only
+  curation reads (step 4): latest-version-per-family listing, one doc
+  (absent `version` = latest; a supplied empty/zero/negative/
+  non-numeric version is `400 invalid`), and newest-first version
+  history. Trigger values may not be empty or contain `","` — the
+  store persists them comma-joined and rejects the lossy cases at
+  `SaveDoc`.
+- `GET /api/releases/preview` — operator-only (step 4): the would-be
+  manifest (`"release_id": 0`) from exactly the cut's candidate
+  computation, including its lints (`409 lint`); inserts nothing.
+  Every JSON response (success and error) also carries
+  `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 - `GET /api/releases/current[?host=<h>]` — latest manifest, same
   schema; with `?host=<h>` a *pending* force-resync flag adds
   `"resync": true` (see the registry). The field is `omitempty`: a
@@ -321,6 +340,13 @@ know the server exists.
    auth+TLS gate for non-loopback binds; `MaxBytesReader` + server
    read/idle timeouts).
 4. Curation UI: browse, edit, history, diff, publish with lints.
+   **Done** (embedded vanilla-JS UI at `/`, strict CSP +
+   frame-denial + no-store, operator-token login with logout,
+   optimistic-lock editing with post-save base advancement, bounded
+   line diff with side-by-side fallback, publish = preview manifest
+   diff + `expected_content_hash`-guarded cut; release preview
+   endpoint + cut precondition + operator-only doc reads on the API;
+   Go httptest + Node built-in-runner test suites).
 5. Conflict records + merge view + resolution audit.
 6. Fleet page + force resync.
 7. Cutover: adapters read the subscriber-materialized corpus (no

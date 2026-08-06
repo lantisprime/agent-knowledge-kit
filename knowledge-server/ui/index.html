@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>knowledge-server curation</title>
+  <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>knowledge-server</h1>
+    <nav>
+      <button id="nav-browse" type="button">Browse</button>
+      <button id="nav-publish" type="button">Publish</button>
+      <span class="spacer"></span>
+      <span id="who" class="who"></span>
+      <button id="logout" type="button" hidden>Logout</button>
+    </nav>
+  </header>
+
+  <main id="view-root">
+    <section id="view-login" class="view" hidden>
+      <h2>Sign in</h2>
+      <p id="login-msg" class="muted"></p>
+      <label>Operator token
+        <input id="login-token" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Editor name (optional)
+        <input id="login-editor" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <button id="login-go" type="button">Sign in</button>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <section id="view-browse" class="view" hidden>
+      <div class="browse-bar">
+        <button id="browse-new" type="button">New doc</button>
+        <label>Collection
+          <select id="filter-collection"><option value="">(any)</option></select>
+        </label>
+        <label>Status
+          <select id="filter-status">
+            <option value="">(any)</option>
+            <option value="draft">draft</option>
+            <option value="active">active</option>
+            <option value="superseded">superseded</option>
+          </select>
+        </label>
+        <label>Tier
+          <select id="filter-tier"><option value="">(any)</option></select>
+        </label>
+      </div>
+      <table id="browse-table">
+        <thead>
+          <tr>
+            <th>collection</th><th>family</th><th>title</th>
+            <th>status</th><th>tier</th><th>version</th>
+            <th>created_at</th><th>editor</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="browse-empty" class="muted" hidden>No docs yet.</p>
+    </section>
+
+    <section id="view-newdoc" class="view" hidden>
+      <h2>New doc</h2>
+      <label>Collection
+        <select id="newdoc-collection">
+          <option value="docs">docs</option>
+          <option value="kernel">kernel</option>
+        </select>
+      </label>
+      <label>Family id
+        <input id="newdoc-family" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="row">
+        <button id="newdoc-go" type="button">Open editor</button>
+        <button id="newdoc-cancel" type="button">Cancel</button>
+      </div>
+      <p id="newdoc-error" class="error" hidden></p>
+    </section>
+
+    <section id="view-editor" class="view" hidden>
+      <h2>Editor</h2>
+      <p id="editor-path" class="muted"></p>
+      <div class="row">
+        <button id="editor-history" type="button">History</button>
+        <button id="editor-reload" type="button">Reload</button>
+      </div>
+      <label>Title <input id="ed-title" type="text" autocomplete="off" spellcheck="false"></label>
+      <div class="row">
+        <label>Status
+          <select id="ed-status">
+            <option value="draft">draft</option>
+            <option value="active">active</option>
+          </select>
+        </label>
+        <label>Tier <input id="ed-tier" type="text" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label>Owner <input id="ed-owner" type="text" autocomplete="off" spellcheck="false"></label>
+      <label>Audience <input id="ed-audience" type="text" autocomplete="off" spellcheck="false"></label>
+      <label>Triggers (comma-separated)
+        <input id="ed-triggers" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Body
+        <textarea id="ed-body" rows="20" spellcheck="false"></textarea>
+      </label>
+      <div id="kernel-counters" class="counters" hidden>
+        <span>words: <strong id="kernel-words">0</strong> / 2000</span>
+        <span>bytes: <strong id="kernel-bytes">0</strong> / 24576</span>
+        <span class="muted">(advisory \u2014 server enforces at release cut)</span>
+      </div>
+      <div class="row">
+        <button id="editor-save" type="button">Save</button>
+        <span id="editor-save-state" class="muted"></span>
+      </div>
+      <p id="editor-error" class="error" hidden></p>
+    </section>
+
+    <section id="view-history" class="view" hidden>
+      <h2>History</h2>
+      <p id="history-path" class="muted"></p>
+      <ul id="history-list"></ul>
+      <div id="history-diff-controls" class="row" hidden>
+        <button id="history-diff-go" type="button">Diff selected</button>
+        <button id="history-back" type="button">Back to editor</button>
+      </div>
+      <pre id="history-diff" class="diff" hidden></pre>
+      <div id="history-fallback" class="diff-fallback" hidden></div>
+    </section>
+
+    <section id="view-publish" class="view" hidden>
+      <h2>Publish</h2>
+      <div class="row publish-row">
+        <button id="publish-refresh" type="button">Refresh</button>
+      </div>
+      <div id="publish-current-wrap">
+        <h3>Current release</h3>
+        <pre id="publish-current" class="manifest"></pre>
+      </div>
+      <div id="publish-preview-wrap">
+        <h3>Candidate</h3>
+        <pre id="publish-preview" class="manifest"></pre>
+        <p id="publish-lint" class="error" hidden></p>
+      </div>
+      <div id="publish-diff-wrap">
+        <h3>Manifest diff</h3>
+        <ul id="publish-diff"></ul>
+        <div id="publish-content-diff"></div>
+      </div>
+      <div class="row">
+        <button id="publish-cut" type="button" disabled>Cut release</button>
+        <button id="publish-confirm" type="button" hidden>Confirm cut</button>
+        <button id="publish-cancel" type="button" hidden>Cancel</button>
+        <span id="publish-state" class="muted"></span>
+      </div>
+      <p id="publish-error" class="error" hidden></p>
+    </section>
+
+    <section id="view-error" class="view" hidden>
+      <h2>Error</h2>
+      <p id="error-text" class="error"></p>
+      <button id="error-retry" type="button">Retry</button>
+    </section>
+  </main>
+
+  <script type="module" src="/ui/app.js"></script>
+</body>
+</html>

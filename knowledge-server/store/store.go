@@ -139,6 +139,31 @@ type Manifest struct {
 	Resync      bool          `json:"resync,omitempty"`
 }
 
+// DocMeta is the per-version metadata returned by list and history
+// views. Bodies are intentionally absent — callers that need the body
+// fetch a specific version through GetDoc.
+type DocMeta struct {
+	Collection string `json:"collection"`
+	FamilyID   string `json:"family_id"`
+	Version    int    `json:"version"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	Tier       string `json:"tier"`
+	Editor     string `json:"editor"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// Doc is the full version view returned by GetDoc. DocMeta is embedded
+// so the per-version fields share the JSON tags above without
+// repetition; consumers that only need metadata can read DocMeta.
+type Doc struct {
+	DocMeta
+	Owner    string   `json:"owner"`
+	Audience string   `json:"audience"`
+	Triggers []string `json:"triggers"`
+	Body     string   `json:"body"`
+}
+
 func Open(path string) (*Store, error) {
 	// WAL + busy_timeout + a single in-process connection make
 	// SQLITE_BUSY structurally impossible for the v1 single-writer
@@ -212,6 +237,18 @@ func (s *Store) SaveDoc(collection, family string, in DocSave) (DocVersion, erro
 	if in.Status != "draft" && in.Status != "active" {
 		return DocVersion{}, fmt.Errorf("%w: status must be draft or active", ErrInvalid)
 	}
+	// Trigger grammar is closed at the write door: the stored form is a
+	// comma-joined string, so any value containing ',' or empty value
+	// would round-trip as the wrong number of triggers. Reject up front
+	// rather than silently joining and re-splitting a lossy form.
+	for _, t := range in.Triggers {
+		if t == "" {
+			return DocVersion{}, fmt.Errorf("%w: trigger values must be non-empty", ErrInvalid)
+		}
+		if strings.Contains(t, ",") {
+			return DocVersion{}, fmt.Errorf("%w: trigger %q contains ','", ErrInvalid, t)
+		}
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return DocVersion{}, err
@@ -260,28 +297,37 @@ func (s *Store) SaveDoc(collection, family string, in DocSave) (DocVersion, erro
 	}, nil
 }
 
-// CutRelease snapshots every active doc in release-bearing collections.
-// Publish lints run here; a lint failure cuts nothing.
-func (s *Store) CutRelease() (Manifest, error) {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return Manifest{}, err
-	}
-	defer tx.Rollback()
+// relDoc carries the per-doc slice of a release candidate. id is the
+// doc_versions row id (used to FK into release_docs); body is needed
+// for the per-doc and content hashes.
+type relDoc struct {
+	id      int64
+	path    string
+	version int
+	family  string
+	body    string
+}
 
+// releaseCandidate computes the would-be release manifest inside the
+// caller's transaction. It returns the manifest with ReleaseID == 0
+// (the caller assigns the inserted row's id) and the per-doc rows
+// needed to populate release_docs. Kernel lint (byte + word cap) and
+// the empty-release lint run here; both surface as ErrLint and the
+// caller rolls back.
+//
+// Transaction ownership is part of the contract: the store pool is
+// pinned to ONE connection (SetMaxOpenConns(1)), so this helper must
+// NEVER touch s.db — a s.db.Query inside an open transaction would
+// deadlock, and computing the candidate outside the cut's transaction
+// would let it change between hash check and insert, defeating the
+// CutRelease expectedHash precondition.
+func (s *Store) releaseCandidate(tx *sql.Tx) (Manifest, []relDoc, error) {
 	rows, err := tx.Query(`SELECT d.id, d.collection, d.family_id, d.version, d.body
 		FROM doc_versions d JOIN collections c ON c.name = d.collection
 		WHERE d.status = 'active' AND c.in_release = 1
 		ORDER BY d.collection, d.family_id`)
 	if err != nil {
-		return Manifest{}, err
-	}
-	type relDoc struct {
-		id      int64
-		path    string
-		version int
-		family  string
-		body    string
+		return Manifest{}, nil, err
 	}
 	var docs []relDoc
 	for rows.Next() {
@@ -289,18 +335,18 @@ func (s *Store) CutRelease() (Manifest, error) {
 		var collection string
 		if err := rows.Scan(&d.id, &collection, &d.family, &d.version, &d.body); err != nil {
 			rows.Close()
-			return Manifest{}, err
+			return Manifest{}, nil, err
 		}
 		d.path = collection + "/" + d.family + ".md"
 		if collection == "kernel" {
 			if len(d.body) > KernelByteCap {
 				rows.Close()
-				return Manifest{}, fmt.Errorf("%w: kernel %q exceeds %d-byte cap",
+				return Manifest{}, nil, fmt.Errorf("%w: kernel %q exceeds %d-byte cap",
 					ErrLint, d.family, KernelByteCap)
 			}
 			if len(strings.Fields(d.body)) > KernelWordCap {
 				rows.Close()
-				return Manifest{}, fmt.Errorf("%w: kernel %q exceeds %d-word cap",
+				return Manifest{}, nil, fmt.Errorf("%w: kernel %q exceeds %d-word cap",
 					ErrLint, d.family, KernelWordCap)
 			}
 		}
@@ -308,10 +354,10 @@ func (s *Store) CutRelease() (Manifest, error) {
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return Manifest{}, err
+		return Manifest{}, nil, err
 	}
 	if len(docs) == 0 {
-		return Manifest{}, fmt.Errorf("%w: release would be empty", ErrLint)
+		return Manifest{}, nil, fmt.Errorf("%w: release would be empty", ErrLint)
 	}
 
 	content := sha256.New()
@@ -327,7 +373,42 @@ func (s *Store) CutRelease() (Manifest, error) {
 		})
 	}
 	manifest.ContentHash = "sha256:" + hex.EncodeToString(content.Sum(nil))
+	return manifest, docs, nil
+}
 
+// PreviewRelease computes the would-be release manifest inside a
+// transaction that is rolled back before return — PreviewRelease
+// never inserts. The returned Manifest has ReleaseID == 0 to make
+// its preview-only nature unambiguous to callers. Lint failures
+// surface as ErrLint exactly like a real cut.
+func (s *Store) PreviewRelease() (Manifest, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Manifest{}, err
+	}
+	defer tx.Rollback()
+	m, _, err := s.releaseCandidate(tx)
+	return m, err
+}
+
+// CutRelease snapshots every active doc in release-bearing collections.
+// When expectedHash is non-empty the candidate content_hash must match
+// it exactly; a mismatch returns ErrConflict and cuts nothing. Pass
+// "" to opt out (the unconditional legacy behavior).
+func (s *Store) CutRelease(expectedHash string) (Manifest, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Manifest{}, err
+	}
+	defer tx.Rollback()
+
+	manifest, docs, err := s.releaseCandidate(tx)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if expectedHash != "" && manifest.ContentHash != expectedHash {
+		return Manifest{}, fmt.Errorf("%w: release candidate changed", ErrConflict)
+	}
 	res, err := tx.Exec(`INSERT INTO releases (content_hash, created_at) VALUES (?, ?)`,
 		manifest.ContentHash, manifest.CreatedAt)
 	if err != nil {
@@ -347,6 +428,118 @@ func (s *Store) CutRelease() (Manifest, error) {
 		return Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// ListDocs returns one DocMeta per family: the max-version row of
+// that family. Empty store → empty non-nil slice (so the JSON wire
+// form is "[]", never "null"). The latest-per-family join shape is
+// pinned by the SQL below — do not switch to a bare GROUP BY over
+// non-aggregated columns, which is undefined in SQL.
+func (s *Store) ListDocs() ([]DocMeta, error) {
+	rows, err := s.db.Query(`SELECT d.collection, d.family_id, d.version, d.title, d.status,
+		d.tier, d.editor, d.created_at
+		FROM doc_versions d
+		JOIN (SELECT collection, family_id, MAX(version) AS v
+		      FROM doc_versions GROUP BY collection, family_id) m
+		  ON m.collection = d.collection AND m.family_id = d.family_id
+		     AND m.v = d.version
+		ORDER BY d.collection, d.family_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DocMeta{}
+	for rows.Next() {
+		var d DocMeta
+		if err := rows.Scan(&d.Collection, &d.FamilyID, &d.Version, &d.Title,
+			&d.Status, &d.Tier, &d.Editor, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// DocHistory returns every version of one family, newest first.
+// Unknown family → ErrNotFound. Both idents are validated.
+func (s *Store) DocHistory(collection, family string) ([]DocMeta, error) {
+	if err := validateIdent("collection", collection); err != nil {
+		return nil, err
+	}
+	if err := validateIdent("family", family); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`SELECT collection, family_id, version, title, status,
+		tier, editor, created_at
+		FROM doc_versions
+		WHERE collection = ? AND family_id = ?
+		ORDER BY version DESC`, collection, family)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DocMeta{}
+	for rows.Next() {
+		var d DocMeta
+		if err := rows.Scan(&d.Collection, &d.FamilyID, &d.Version, &d.Title,
+			&d.Status, &d.Tier, &d.Editor, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, ErrNotFound
+	}
+	return out, nil
+}
+
+// GetDoc returns the full Doc for one version. version <= 0 means
+// latest (max version in the family). Unknown family/version →
+// ErrNotFound. Both idents are validated. Triggers decode from the
+// comma-joined stored form: empty stored string yields a non-nil
+// empty slice, never []string{""}.
+func (s *Store) GetDoc(collection, family string, version int) (Doc, error) {
+	if err := validateIdent("collection", collection); err != nil {
+		return Doc{}, err
+	}
+	if err := validateIdent("family", family); err != nil {
+		return Doc{}, err
+	}
+	var (
+		row  *sql.Row
+		doc  Doc
+		trig string
+	)
+	if version <= 0 {
+		row = s.db.QueryRow(`SELECT collection, family_id, version, title, status,
+			owner, audience, tier, triggers, body, editor, created_at
+			FROM doc_versions
+			WHERE collection = ? AND family_id = ?
+			ORDER BY version DESC LIMIT 1`, collection, family)
+	} else {
+		row = s.db.QueryRow(`SELECT collection, family_id, version, title, status,
+			owner, audience, tier, triggers, body, editor, created_at
+			FROM doc_versions
+			WHERE collection = ? AND family_id = ? AND version = ?`,
+			collection, family, version)
+	}
+	err := row.Scan(&doc.Collection, &doc.FamilyID, &doc.Version, &doc.Title,
+		&doc.Status, &doc.Owner, &doc.Audience, &doc.Tier, &trig, &doc.Body,
+		&doc.Editor, &doc.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Doc{}, ErrNotFound
+	}
+	if err != nil {
+		return Doc{}, err
+	}
+	doc.Triggers = []string{}
+	if trig != "" {
+		doc.Triggers = strings.Split(trig, ",")
+	}
+	return doc, nil
 }
 
 func (s *Store) manifest(where string, arg any) (Manifest, error) {

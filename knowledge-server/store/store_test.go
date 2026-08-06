@@ -181,7 +181,7 @@ func TestCutReleaseExcludesDraftsAndIsDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m1, err := s.CutRelease()
+	m1, err := s.CutRelease("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestCutReleaseExcludesDraftsAndIsDeterministic(t *testing.T) {
 		t.Fatalf("want paths %v, got %v", want, paths)
 	}
 
-	m2, err := s.CutRelease()
+	m2, err := s.CutRelease("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,14 +208,14 @@ func TestCutReleaseExcludesDraftsAndIsDeterministic(t *testing.T) {
 
 func TestCutReleaseLints(t *testing.T) {
 	s := open(t)
-	if _, err := s.CutRelease(); !errors.Is(err, ErrLint) {
+	if _, err := s.CutRelease(""); !errors.Is(err, ErrLint) {
 		t.Fatalf("empty release: want ErrLint, got %v", err)
 	}
 	big := strings.Repeat("word ", KernelWordCap+1)
 	if _, err := s.SaveDoc("kernel", "kernel", DocSave{Status: "active", Body: big}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CutRelease(); !errors.Is(err, ErrLint) {
+	if _, err := s.CutRelease(""); !errors.Is(err, ErrLint) {
 		t.Fatalf("over-cap kernel: want ErrLint, got %v", err)
 	}
 }
@@ -245,7 +245,7 @@ func TestCutReleaseKernelByteCap(t *testing.T) {
 		if _, err := s.SaveDoc("kernel", "wide", DocSave{Status: "active", Body: body}); err != nil {
 			t.Fatalf("SaveDoc accepts the oversized body: %v", err)
 		}
-		if _, err := s.CutRelease(); !errors.Is(err, ErrLint) {
+		if _, err := s.CutRelease(""); !errors.Is(err, ErrLint) {
 			t.Fatalf("want ErrLint, got %v", err)
 		}
 	})
@@ -255,7 +255,7 @@ func TestCutReleaseKernelByteCap(t *testing.T) {
 		if _, err := s.SaveDoc("kernel", "plain", DocSave{Status: "active", Body: strings.Repeat("x", KernelByteCap+1)}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CutRelease(); !errors.Is(err, ErrLint) {
+		if _, err := s.CutRelease(""); !errors.Is(err, ErrLint) {
 			t.Fatalf("want ErrLint, got %v", err)
 		}
 	})
@@ -265,7 +265,7 @@ func TestCutReleaseKernelByteCap(t *testing.T) {
 		if _, err := s.SaveDoc("kernel", "small", DocSave{Status: "active", Body: "small"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CutRelease(); err != nil {
+		if _, err := s.CutRelease(""); err != nil {
 			t.Fatalf("small kernel must cut: %v", err)
 		}
 	})
@@ -279,7 +279,7 @@ func TestCurrentReleaseAndArchive(t *testing.T) {
 	if _, err := s.SaveDoc("kernel", "kernel", DocSave{Status: "active", Body: "rules"}); err != nil {
 		t.Fatal(err)
 	}
-	cut, err := s.CutRelease()
+	cut, err := s.CutRelease("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,6 +504,308 @@ func TestIssueHostTokenInvalidHost(t *testing.T) {
 	}
 	if err := s.RevokeHostToken("../evil"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("revoke '..' host: want ErrInvalid, got %v", err)
+	}
+}
+
+// TestSaveDocRejectsCommaContainingTrigger — trigger grammar is closed
+// at the write door: empty values and any value containing ',' are
+// rejected with ErrInvalid so the comma-joined stored form cannot
+// round-trip as the wrong number of triggers. A round-trip of
+// ["deploy","rollback"] succeeds.
+func TestSaveDocRejectsCommaContainingTrigger(t *testing.T) {
+	s := open(t)
+	if _, err := s.SaveDoc("docs", "x", DocSave{Status: "draft", Body: "b", Triggers: []string{"deploy,rollback"}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("comma in trigger: want ErrInvalid, got %v", err)
+	}
+	if _, err := s.SaveDoc("docs", "x", DocSave{Status: "draft", Body: "b", Triggers: []string{""}}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("empty trigger: want ErrInvalid, got %v", err)
+	}
+	v, err := s.SaveDoc("docs", "ok", DocSave{Status: "draft", Body: "b", Triggers: []string{"deploy", "rollback"}})
+	if err != nil {
+		t.Fatalf("two-trigger save: %v", err)
+	}
+	got, err := s.GetDoc(v.Collection, v.FamilyID, v.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Triggers) != 2 || got.Triggers[0] != "deploy" || got.Triggers[1] != "rollback" {
+		t.Fatalf("round-trip triggers: got %#v", got.Triggers)
+	}
+	// No triggers round-trips as the empty slice.
+	v2, err := s.SaveDoc("docs", "empty", DocSave{Status: "draft", Body: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2, err := s.GetDoc(v2.Collection, v2.FamilyID, v2.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.Triggers == nil {
+		t.Fatalf("no triggers must round-trip as a non-nil empty slice")
+	}
+	if len(got2.Triggers) != 0 {
+		t.Fatalf("no triggers: len=%d, want 0", len(got2.Triggers))
+	}
+}
+
+// TestListDocsFieldOracle — construct a family where the max-version
+// row differs from older rows in title, status, tier, editor, and
+// created_at; assert EVERY returned field is from the max-version
+// row. Plus ordering and the empty case (non-nil empty slice).
+func TestListDocsFieldOracle(t *testing.T) {
+	t.Run("empty store returns non-nil empty slice", func(t *testing.T) {
+		s := open(t)
+		got, err := s.ListDocs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == nil {
+			t.Fatalf("empty store: want non-nil empty slice, got nil")
+		}
+		if len(got) != 0 {
+			t.Fatalf("empty store: len=%d, want 0", len(got))
+		}
+	})
+	t.Run("max-version fields win and ordering is (collection, family_id)", func(t *testing.T) {
+		s := open(t)
+		// family "older": v1 active, then v2 active (demotes v1 to
+		// superseded), then v3 active (demotes v2 to superseded). The
+		// older rows have their own title/tier/editor/created_at that
+		// must NOT bleed into the list view; v3 must win on every
+		// field.
+		if _, err := s.SaveDoc("docs", "older", DocSave{Status: "active", Title: "v1-title", Tier: "v1-tier", Editor: "v1-editor", Body: "v1"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("docs", "older", DocSave{Status: "active", Title: "v2-title", Tier: "v2-tier", Editor: "v2-editor", Body: "v2"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("docs", "older", DocSave{Status: "active", Title: "v3-title", Tier: "v3-tier", Editor: "v3-editor", Body: "v3"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("kernel", "kernel", DocSave{Status: "active", Title: "k-title", Tier: "A", Editor: "k-editor", Body: "k-body"}); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := s.ListDocs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 families (docs/older + kernel/kernel), got %d: %#v", len(got), got)
+		}
+		// ORDER BY collection, family_id → docs/older first.
+		if got[0].Collection != "docs" || got[0].FamilyID != "older" {
+			t.Fatalf("got[0] = (%s,%s), want (docs,older)", got[0].Collection, got[0].FamilyID)
+		}
+		if got[1].Collection != "kernel" || got[1].FamilyID != "kernel" {
+			t.Fatalf("got[1] = (%s,%s), want (kernel,kernel)", got[1].Collection, got[1].FamilyID)
+		}
+		// Every field of docs/older must come from the max-version row (v3).
+		d := got[0]
+		if d.Version != 3 {
+			t.Fatalf("docs/older version = %d, want 3", d.Version)
+		}
+		if d.Title != "v3-title" || d.Tier != "v3-tier" || d.Editor != "v3-editor" {
+			t.Fatalf("docs/older fields not from max-version row: %#v", d)
+		}
+		// v3 was saved as active — the join must NOT report v2's
+		// status. Sanity check.
+		if d.Status != "active" {
+			t.Fatalf("docs/older status = %q, want active", d.Status)
+		}
+		// ListDocs and DocHistory share the same row source of truth
+		// (doc_versions). Asserting field-for-field equality with
+		// DocHistory(...)[0] removes the need to time-control
+		// created_at: whatever value ListDocs chose, DocHistory must
+		// agree on it. This is the join-shape oracle the brief
+		// pinned.
+		history, err := s.DocHistory("docs", "older")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if history[0] != d {
+			t.Fatalf("ListDocs row does not match DocHistory[0]: list=%#v history=%#v", d, history[0])
+		}
+	})
+}
+
+// TestDocHistoryNewestFirstAndNotFound — newest-first ordering plus
+// ErrNotFound on unknown family. Both idents are validated before the
+// query.
+func TestDocHistoryNewestFirstAndNotFound(t *testing.T) {
+	s := open(t)
+	for i := 1; i <= 3; i++ {
+		if _, err := s.SaveDoc("docs", "h", DocSave{Status: "draft", Body: "v"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.DocHistory("docs", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	for i := 0; i < len(got)-1; i++ {
+		if got[i].Version <= got[i+1].Version {
+			t.Fatalf("not newest-first: %v then %v", got[i].Version, got[i+1].Version)
+		}
+	}
+	if _, err := s.DocHistory("docs", "absent"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("absent family: want ErrNotFound, got %v", err)
+	}
+	if _, err := s.DocHistory("..", "h"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("bad collection ident: want ErrInvalid, got %v", err)
+	}
+	if _, err := s.DocHistory("docs", "with/slash"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("bad family ident: want ErrInvalid, got %v", err)
+	}
+}
+
+// TestGetDoc — latest vs explicit version, triggers round-trip
+// including the empty case (non-nil empty slice, never []string{""}),
+// ErrNotFound on unknown family/version, ident rejection on entry.
+func TestGetDoc(t *testing.T) {
+	s := open(t)
+	if _, err := s.SaveDoc("docs", "g", DocSave{Status: "draft", Body: "v1", Triggers: nil}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveDoc("docs", "g", DocSave{Status: "active", Body: "v2", Triggers: []string{"a", "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Latest (version <= 0) → v2 with both triggers.
+	got, err := s.GetDoc("docs", "g", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 2 || got.Body != "v2" || len(got.Triggers) != 2 || got.Triggers[0] != "a" || got.Triggers[1] != "b" {
+		t.Fatalf("latest: %#v", got)
+	}
+	// Explicit version → v1 with no triggers (empty stored form, non-nil slice).
+	v1, err := s.GetDoc("docs", "g", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v1.Version != 1 || v1.Body != "v1" {
+		t.Fatalf("v1: %#v", v1)
+	}
+	if v1.Triggers == nil {
+		t.Fatalf("empty triggers must round-trip as non-nil empty slice, got nil")
+	}
+	if len(v1.Triggers) != 0 {
+		t.Fatalf("v1 triggers len=%d, want 0", len(v1.Triggers))
+	}
+	// Unknown family → ErrNotFound.
+	if _, err := s.GetDoc("docs", "absent", 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("absent: want ErrNotFound, got %v", err)
+	}
+	// Unknown version → ErrNotFound.
+	if _, err := s.GetDoc("docs", "g", 99); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("absent version: want ErrNotFound, got %v", err)
+	}
+	// Ident rejection.
+	if _, err := s.GetDoc("..", "g", 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("bad collection ident: want ErrInvalid, got %v", err)
+	}
+	if _, err := s.GetDoc("docs", "with/slash", 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("bad family ident: want ErrInvalid, got %v", err)
+	}
+}
+
+// TestPreviewReleaseVsDraft — only active rows contribute to the
+// release candidate. A newer draft is invisible to PreviewRelease and
+// to CutRelease: both ship the active row. The cut manifest's docs
+// list must equal the preview docs list path/family_id/version/
+// sha256, in order — not just one field.
+func TestPreviewReleaseVsDraft(t *testing.T) {
+	s := open(t)
+	if _, err := s.SaveDoc("docs", "r", DocSave{Status: "active", Body: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveDoc("docs", "r", DocSave{Status: "draft", Body: "v2"}); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.PreviewRelease()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.ReleaseID != 0 {
+		t.Fatalf("preview release_id = %d, want 0", preview.ReleaseID)
+	}
+	if len(preview.Docs) != 1 || preview.Docs[0].FamilyID != "r" || preview.Docs[0].Version != 1 {
+		t.Fatalf("preview docs: %#v", preview.Docs)
+	}
+	cut, err := s.CutRelease("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cut.Docs) != 1 || cut.Docs[0].Version != 1 || cut.ContentHash != preview.ContentHash {
+		t.Fatalf("cut must match preview: cut=%#v preview=%#v", cut, preview)
+	}
+	// Full-doc-list equality: the cut's release_docs rows equal the
+	// preview's would-be rows. After the cut, CurrentRelease (the
+	// persisted view) must report the same docs in the same order.
+	if !docsEqual(preview.Docs, cut.Docs) {
+		t.Fatalf("preview docs != cut docs: prev=%#v cut=%#v", preview.Docs, cut.Docs)
+	}
+	cur, err := s.CurrentRelease()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !docsEqual(cur.Docs, cut.Docs) {
+		t.Fatalf("CurrentRelease docs != cut docs: cur=%#v cut=%#v", cur.Docs, cut.Docs)
+	}
+}
+
+// docsEqual compares two manifest doc lists path/family_id/version/
+// sha256, in order.
+func docsEqual(a, b []ManifestDoc) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestCutReleaseStaleExpectedHash — when expectedHash does not match
+// the would-be content_hash, CutRelease returns ErrConflict and
+// inserts NO release row.
+func TestCutReleaseStaleExpectedHash(t *testing.T) {
+	s := open(t)
+	if _, err := s.SaveDoc("kernel", "kernel", DocSave{Status: "active", Body: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := s.PreviewRelease()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Change the active doc so the candidate hash diverges.
+	if _, err := s.SaveDoc("kernel", "kernel", DocSave{Status: "active", Body: "v2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CutRelease(preview.ContentHash); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale hash: want ErrConflict, got %v", err)
+	}
+	// No release row was inserted.
+	if _, err := s.CurrentRelease(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale hash must not insert: CurrentRelease err=%v", err)
+	}
+	// Matching hash on a re-cut succeeds; release rows equal the
+	// preview manifest by construction.
+	cur, err := s.PreviewRelease()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut, err := s.CutRelease(cur.ContentHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cut.ContentHash != cur.ContentHash || cut.ReleaseID == 0 {
+		t.Fatalf("matching cut: cut=%#v cur=%#v", cut, cur)
 	}
 }
 
