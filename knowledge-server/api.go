@@ -42,6 +42,10 @@ func newMux(st *store.Store, auth *authState) *http.ServeMux {
 	mux.HandleFunc("POST /api/hosts/{host}/resync", a.secure(true, a.requestResync))
 	mux.HandleFunc("POST /api/hosts/{host}/token", a.secure(true, a.issueToken))
 	mux.HandleFunc("DELETE /api/hosts/{host}/token", a.secure(true, a.revokeToken))
+	mux.HandleFunc("GET /api/conflicts", a.secure(true, a.listConflicts))
+	mux.HandleFunc("GET /api/conflicts/{id}", a.secure(true, a.getConflict))
+	mux.HandleFunc("POST /api/conflicts", a.secure(true, a.flagConflict))
+	mux.HandleFunc("POST /api/conflicts/{id}/resolve", a.secure(true, a.resolveConflict))
 	registerUI(mux)
 	return mux
 }
@@ -77,7 +81,19 @@ func writeErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, errTooLarge):
 		code, status = "too_large", http.StatusRequestEntityTooLarge
 	}
-	writeJSON(w, status, map[string]string{"error": code, "detail": err.Error()})
+	// The envelope is {error, detail, conflict_id?}. conflict_id is
+	// added ONLY when the error wraps a ConflictRecordedError — the
+	// rejection committed a record (stale-base save, lint-failed cut)
+	// and the caller can fetch /api/conflicts/{id} for the full
+	// shape. Status / code mapping itself is unchanged: Unwrap keeps
+	// errors.Is(err, ErrConflict/ErrLint) working for any caller
+	// that does its own classification.
+	envelope := map[string]any{"error": code, "detail": err.Error()}
+	var cre *store.ConflictRecordedError
+	if errors.As(err, &cre) {
+		envelope["conflict_id"] = cre.ID
+	}
+	writeJSON(w, status, envelope)
 }
 
 // decodeBody decodes a JSON request body, distinguishing the
@@ -193,7 +209,11 @@ func (a *api) cutRelease(w http.ResponseWriter, r *http.Request) {
 		}
 		expected = *in.ExpectedContentHash
 	}
-	m, err := a.st.CutRelease(expected)
+	editor := r.Header.Get("X-Editor")
+	if editor == "" {
+		editor = "operator"
+	}
+	m, err := a.st.CutRelease(expected, editor)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -379,4 +399,115 @@ func (a *api) revokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- conflict endpoints (build-order step 5) ------------------------------
+
+// listConflicts returns conflicts newest-first. ?status=open|resolved
+// filters; empty / absent means all. Other values surface as 400
+// invalid from the store ErrInvalid mapping — the handler does not
+// double-validate.
+func (a *api) listConflicts(w http.ResponseWriter, r *http.Request) {
+	conflicts, err := a.st.ListConflicts(r.URL.Query().Get("status"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conflicts": conflicts})
+}
+
+// getConflict returns one full record. {id} parsed with
+// strconv.ParseInt; parse failure → 400 invalid "bad conflict id".
+// Unknown id → 404 from the store ErrNotFound mapping.
+func (a *api) getConflict(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, fmt.Errorf("%w: bad conflict id", store.ErrInvalid))
+		return
+	}
+	c, err := a.st.GetConflict(id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+// flagConflict opens a manual claim conflict. Body:
+//
+//	{"collection", "family_id", "other_collection"?,
+//	 "other_family_id"?, "detail"}
+//
+// Empty other_* fields are omitted from the body entirely (the store
+// accepts them as empty strings). opened_by from X-Editor, defaulting
+// "operator". 201 carries the created record; 409 is the duplicate-
+// open-claim path; 400 invalid surfaces missing detail, half-set
+// other pair, self-claim, and bad idents.
+func (a *api) flagConflict(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Collection      string `json:"collection"`
+		FamilyID        string `json:"family_id"`
+		OtherCollection string `json:"other_collection,omitempty"`
+		OtherFamilyID   string `json:"other_family_id,omitempty"`
+		Detail          string `json:"detail"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	openedBy := r.Header.Get("X-Editor")
+	if openedBy == "" {
+		openedBy = "operator"
+	}
+	c, err := a.st.FlagClaimConflict(in.Collection, in.FamilyID, in.OtherCollection, in.OtherFamilyID, in.Detail, openedBy)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, c)
+}
+
+// resolveConflict body:
+//
+//	{"resolution", "expected_attempts", "save"?}
+//
+// expected_attempts is REQUIRED and must be >= 1 — the zero value
+// must never silently skip the precondition. save is optional and
+// only legal for kind=edit. resolved_by from X-Editor defaulting
+// "operator"; the nested save's Editor field is the same value.
+func (a *api) resolveConflict(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, fmt.Errorf("%w: bad conflict id", store.ErrInvalid))
+		return
+	}
+	var in struct {
+		Resolution       string         `json:"resolution"`
+		ExpectedAttempts *int           `json:"expected_attempts"`
+		Save             *store.DocSave `json:"save"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if in.ExpectedAttempts == nil || *in.ExpectedAttempts < 1 {
+		writeErr(w, fmt.Errorf("%w: expected_attempts is required", store.ErrInvalid))
+		return
+	}
+	resolvedBy := r.Header.Get("X-Editor")
+	if resolvedBy == "" {
+		resolvedBy = "operator"
+	}
+	if in.Save != nil {
+		// Editor on a nested save is operator-supplied; it is the
+		// same identity as resolved_by so the audit trail is one
+		// string per action.
+		in.Save.Editor = resolvedBy
+	}
+	c, err := a.st.ResolveConflict(id, in.Resolution, *in.ExpectedAttempts, in.Save, resolvedBy)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
 }

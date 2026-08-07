@@ -12,6 +12,7 @@
     <nav>
       <button id="nav-browse" type="button">Browse</button>
       <button id="nav-publish" type="button">Publish</button>
+      <button id="nav-conflicts" type="button">Conflicts</button>
       <span class="spacer"></span>
       <span id="who" class="who"></span>
       <button id="logout" type="button" hidden>Logout</button>
@@ -29,7 +30,7 @@
         <input id="login-editor" type="text" autocomplete="off" spellcheck="false">
       </label>
       <button id="login-go" type="button">Sign in</button>
-      <p id="login-error" class="error" hidden></p>
+      <p id="login-error" class="error"></p>
     </section>
 
     <section id="view-browse" class="view" hidden>
@@ -78,7 +79,7 @@
         <button id="newdoc-go" type="button">Open editor</button>
         <button id="newdoc-cancel" type="button">Cancel</button>
       </div>
-      <p id="newdoc-error" class="error" hidden></p>
+      <p id="newdoc-error" class="error"></p>
     </section>
 
     <section id="view-editor" class="view" hidden>
@@ -113,9 +114,10 @@
       </div>
       <div class="row">
         <button id="editor-save" type="button">Save</button>
+        <button id="editor-merge" type="button" hidden>Open merge view</button>
         <span id="editor-save-state" class="muted"></span>
       </div>
-      <p id="editor-error" class="error" hidden></p>
+      <p id="editor-error" class="error"></p>
     </section>
 
     <section id="view-history" class="view" hidden>
@@ -155,7 +157,96 @@
         <button id="publish-cancel" type="button" hidden>Cancel</button>
         <span id="publish-state" class="muted"></span>
       </div>
-      <p id="publish-error" class="error" hidden></p>
+      <p id="publish-error" class="error"></p>
+    </section>
+
+    <section id="view-conflicts" class="view" hidden>
+      <h2>Conflicts</h2>
+      <label><input id="conflicts-show-resolved" type="checkbox"> show resolved</label>
+      <table id="conflicts-table">
+        <thead>
+          <tr>
+            <th>id</th><th>kind</th><th>status</th><th>doc</th><th>other</th>
+            <th>attempts</th><th>detail</th><th>opened_by</th><th>opened_at</th>
+            <th>resolved_by</th><th>resolution</th><th>winning</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="conflicts-empty" class="muted" hidden>No conflicts.</p>
+      <h3>Flag a claim conflict</h3>
+      <label>Collection
+        <input id="cf-collection" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Family id
+        <input id="cf-family" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Other collection (optional)
+        <input id="cf-other-collection" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Other family id (optional)
+        <input id="cf-other-family" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label>Detail
+        <input id="cf-detail" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="row">
+        <button id="cf-go" type="button">Flag claim conflict</button>
+      </div>
+      <p id="cf-error" class="error"></p>
+    </section>
+
+    <section id="view-conflict" class="view" hidden>
+      <h2>Conflict</h2>
+      <p id="conflict-title" class="muted"></p>
+      <h3>Record</h3>
+      <pre id="conflict-record" class="manifest"></pre>
+      <div id="conflict-merge" hidden>
+        <h3>Body diff (attempted vs current)</h3>
+        <pre id="conflict-diff" class="diff" hidden></pre>
+        <div id="conflict-diff-fallback" class="diff-fallback" hidden></div>
+        <h3>Metadata</h3>
+        <table id="conflict-meta-diff">
+          <thead>
+            <tr><th>field</th><th>attempted</th><th>current</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <h3>Merged save</h3>
+        <label>Title <input id="mg-title" type="text" autocomplete="off" spellcheck="false"></label>
+        <div class="row">
+          <label>Status
+            <select id="mg-status">
+              <option value="draft">draft</option>
+              <option value="active">active</option>
+            </select>
+          </label>
+          <label>Tier <input id="mg-tier" type="text" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <label>Owner <input id="mg-owner" type="text" autocomplete="off" spellcheck="false"></label>
+        <label>Audience <input id="mg-audience" type="text" autocomplete="off" spellcheck="false"></label>
+        <label>Triggers (comma-separated)
+          <input id="mg-triggers" type="text" autocomplete="off" spellcheck="false">
+        </label>
+        <label>Body
+          <textarea id="mg-body" rows="20" spellcheck="false"></textarea>
+        </label>
+        <div class="row">
+          <button id="mg-load-attempted" type="button">Load attempted</button>
+          <button id="mg-load-current" type="button">Load current</button>
+        </div>
+      </div>
+      <h3>Resolution</h3>
+      <label>Resolution text
+        <input id="conflict-resolution" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="row">
+        <button id="conflict-resolve-save" type="button" hidden disabled>Save merged &amp; resolve</button>
+        <button id="conflict-resolve-keep" type="button" disabled>Resolve</button>
+        <button id="conflict-back" type="button">Back to conflicts</button>
+        <span id="conflict-state" class="muted"></span>
+      </div>
+      <p id="conflict-error" class="error"></p>
     </section>
 
     <section id="view-error" class="view" hidden>

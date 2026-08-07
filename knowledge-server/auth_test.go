@@ -51,7 +51,7 @@ func newAuthedFixtureWith(t *testing.T, operator string, seedRelease bool) *auth
 		if _, err := s.SaveDoc("docs", "runbook", store.DocSave{Status: "draft", Body: "x"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CutRelease(""); err != nil {
+		if _, err := s.CutRelease("", "tester"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -79,7 +79,7 @@ func newUnauthFixture(t *testing.T, seedRelease bool) *httptest.Server {
 		if _, err := s.SaveDoc("kernel", "kernel", store.DocSave{Status: "active", Body: "rules"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CutRelease(""); err != nil {
+		if _, err := s.CutRelease("", "tester"); err != nil {
 			t.Fatal(err)
 		}
 	}
