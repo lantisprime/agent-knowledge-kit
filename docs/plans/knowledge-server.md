@@ -3,9 +3,10 @@
 Status: accepted direction (operator decision, 2026-08-04). This plan
 supersedes the git-transport delivery model and the separate-identity
 delivery trust boundary (`delivery-trust-boundary.md`). Implementation
-has landed for build-order steps 1–4 (store + schema + release cut;
+has landed for build-order steps 1–5 (store + schema + release cut;
 thin subscriber with token-bound identity; authN; embedded curation
-UI); the git transport is not yet retired — cutover is step 7.
+UI; conflict records + merge view); the git transport is not yet
+retired — cutover is step 7.
 
 ## Operator constraints (fixed)
 
@@ -117,12 +118,22 @@ trigger-loaded. Query-tier collections are not in the snapshot.
 First-class conflict records with a resolution audit trail: what
 conflicted, both versions, who resolved it, the winning version, when.
 
-- *Edit conflicts* — optimistic locking on save; the later writer is
-  redirected to a merge view instead of overwriting.
+- *Edit conflicts* — optimistic locking on save; the later writer's
+  save is rejected, a conflict record is opened automatically, and
+  the editor offers the merge view. **Shipped (step 5).**
 - *Claim conflicts* — "one claim, one home" violations flagged for
   resolution (v1: manual flagging; automated detection later).
+  **Shipped (step 5)** as the manual flag path; automated detection
+  remains deferred.
 - *Policy conflicts* — publish-blocking lints: kernel over cap, a
   draft referenced by an active doc, dangling supersession.
+  **Shipped (step 5) for kernel-cap lints only**: byte-cap and
+  word-cap failures auto-open a policy record on the offending
+  family, and a successful cut auto-resolves every open policy
+  record. The draft-reference and dangling-supersession lints
+  depend on the post-v1 `doc_links` slice and are NOT shipped —
+  the plan-doc "Conflict management" edit above says so
+  explicitly.
 - *Cross-collection conflicts* — an API-submitted episode that
   contradicts an active curated doc surfaces for human resolution:
   supersede the doc or mark the episode wrong. Lands with the
@@ -195,8 +206,10 @@ messages.
 produces rows and release snapshots. No other process or component
 opens the database file. Never: parse HTTP, render UI, talk to hosts.
 
-**HTTP API — the only write door.** All schemas are JSON; errors are
-always `{"error": "<code>", "detail": "<text>"}`.
+**HTTP API — the only write door.** All schemas are JSON; errors
+are always `{"error": "<code>", "detail": "<text>"}` and MAY
+carry `"conflict_id": <id>` when the rejection committed a
+conflict record (stale-base save, lint-failed cut).
 
 - `PUT /api/docs/{collection}/{family}` — save a new doc version.
   Request: `{"title", "status": "draft|active", "tier", "triggers":
@@ -259,6 +272,41 @@ always `{"error": "<code>", "detail": "<text>"}`.
   completion cannot alter state or leak anything newer than the
   already-authorized release. Response: `204`, or `404 {"error":
   "not_found", ...}` when no token was issued.
+- `GET /api/conflicts[?status=open|resolved]` — operator-only
+  list of conflict records, newest first. Empty/absent `status`
+  returns all. The list view carries no `attempted` payload (call
+  `GET /api/conflicts/{id}` for the full record). Response: `200
+  {"conflicts": [...]}`.
+- `GET /api/conflicts/{id}` — operator-only single record,
+  including the latest rejected `DocSave` for edit conflicts.
+  `{id}` must parse as an integer; parse failure is `400 invalid`
+  and an unknown id is `404 not_found`. An unparseable `attempted`
+  column surfaces as a `500 internal` (a "we wrote a bad row"
+  condition, never silently swallowed). Response: `200 <Conflict>`.
+- `POST /api/conflicts` — operator-only manual claim-conflict
+  flagging. Body: `{"collection", "family_id", "other_collection"?,
+  "other_family_id"?, "detail"}`. `detail` is required (whitespace
+  counts as missing); the other pair is optional but must be
+  all-or-nothing. Self-claim (other pair == primary) is `400
+  invalid`; bad idents are `400 invalid`; a duplicate open claim
+  for the canonicalized primary is `409 conflict`. `opened_by` is
+  `X-Editor` (default `"operator"`). Response: `201 <Conflict>`.
+- `POST /api/conflicts/{id}/resolve` — operator-only resolve.
+  Body: `{"resolution": "<non-empty>", "expected_attempts": N,
+  "save": {<DocSave fields incl optional base_version>}?}`.
+  `expected_attempts` is REQUIRED and must be `>= 1` — the API
+  rejects `nil`/`< 1` as `400 invalid "expected_attempts is
+  required"` so the zero value can never silently skip the
+  precondition (the same fail-closed principle as
+  `expected_content_hash` on the cut body). When `expected_attempts`
+  does not equal the row's current `attempts`, the resolution is
+  `409 conflict` (the row is untouched, no record is committed
+  on that path). `save` is legal only for `kind="edit"`; the
+  server runs `validateDocSave + saveDocTx` atomically — a stale
+  base inside resolve returns plain `409 conflict`, the conflict
+  row stays open, no new version is inserted. `resolved_by` is
+  `X-Editor` (default `"operator"`); the nested `save.Editor` is
+  the same value. Response: `200 <Conflict>` (the resolved record).
 
 With authentication enabled (`-operator-token-file` set), every
 endpoint above requires `Authorization: Bearer <token>` on every
@@ -347,7 +395,17 @@ know the server exists.
    diff + `expected_content_hash`-guarded cut; release preview
    endpoint + cut precondition + operator-only doc reads on the API;
    Go httptest + Node built-in-runner test suites).
-5. Conflict records + merge view + resolution audit.
+5. Conflict records + merge view + resolution audit. **Done**
+   (conflicts table, DB-enforced append-only resolution audit — no
+   deletes, resolved rows immutable; edit-conflict auto-record on
+   stale save with latest attempted payload + attempts counter; claim
+   flagging with canonicalized pair + version snapshots; policy
+   records auto-opened on failed cut / auto-resolved by the next
+   successful cut — kernel-cap lints only, draft-reference and
+   dangling-supersession lints await the post-v1 doc_links slice;
+   merge view with body diff, metadata diff, atomic save-and-resolve
+   behind an attempts precondition; conflict endpoints
+   operator-only).
 6. Fleet page + force resync.
 7. Cutover: adapters read the subscriber-materialized corpus (no
    adapter change expected); retire the git transport; update

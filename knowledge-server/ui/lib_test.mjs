@@ -9,6 +9,8 @@ import {
   encodePath, countWords, countBytes, parseTriggers,
   isExpectedContentHashShape, initialSaveState, afterSave, onConflict,
   lineDiff, manifestDiff,
+  conflictsPath, conflictPath, resolveConflictPath,
+  toFormFields, metaDiffRows, resolvePayload,
 } from "./lib.mjs";
 
 // ---------- encodePath ----------
@@ -285,4 +287,155 @@ test("manifestDiff empty new yields all removed", () => {
   assert.equal(added.length, 0);
   assert.equal(removed.length, 1);
   assert.equal(changed.length, 0);
+});
+
+// ---------- conflictsPath / conflictPath / resolveConflictPath ----------
+
+test("conflictsPath no status is literal /api/conflicts", () => {
+  // The wire form is pinned: empty / undefined / null / "" all yield
+  // the unfiltered path with no query string. The handler treats
+  // absent status as "all".
+  assert.equal(conflictsPath(""), "/api/conflicts");
+  assert.equal(conflictsPath(undefined), "/api/conflicts");
+  assert.equal(conflictsPath(null), "/api/conflicts");
+});
+
+test("conflictsPath encodes status values", () => {
+  assert.equal(conflictsPath("open"), "/api/conflicts?status=open");
+  assert.equal(conflictsPath("resolved"), "/api/conflicts?status=resolved");
+  // Defensive: a status with characters the URL grammar would
+  // mangle must still produce a valid query value.
+  assert.equal(conflictsPath("with space"), "/api/conflicts?status=with%20space");
+  assert.equal(conflictsPath("a&b"), "/api/conflicts?status=a%26b");
+});
+
+test("conflictPath / resolveConflictPath use encodeURIComponent on id", () => {
+  assert.equal(conflictPath(1), "/api/conflicts/1");
+  assert.equal(conflictPath("42"), "/api/conflicts/42");
+  // A numeric-looking id with characters that need encoding still
+  // encodes — the server validates the parsed int, but the wire
+  // form must never leave an unescaped byte.
+  assert.equal(resolveConflictPath(7), "/api/conflicts/7/resolve");
+  // resolveConflictPath composes on conflictPath, not by string
+  // concatenation in the caller.
+  assert.equal(resolveConflictPath(2), conflictPath(2) + "/resolve");
+});
+
+// ---------- toFormFields ----------
+
+test("toFormFields full doc", () => {
+  const doc = {
+    title: "T", status: "active", tier: "B", owner: "alice",
+    audience: "ops", triggers: ["a", "b"], body: "body",
+  };
+  assert.deepEqual(toFormFields(doc), {
+    title: "T", status: "active", tier: "B", owner: "alice",
+    audience: "ops", triggers: "a, b", body: "body",
+  });
+});
+
+test("toFormFields nullish fields become empty strings; status defaults to draft", () => {
+  const doc = { title: null, status: undefined, triggers: null };
+  const out = toFormFields(doc);
+  assert.equal(out.title, "");
+  assert.equal(out.status, "draft");
+  assert.equal(out.triggers, "");
+  assert.equal(out.body, "");
+  assert.equal(out.tier, "");
+  assert.equal(out.owner, "");
+  assert.equal(out.audience, "");
+});
+
+test("toFormFields null docLike → all-empty shape with status draft", () => {
+  const out = toFormFields(null);
+  assert.deepEqual(out, {
+    title: "", status: "draft", tier: "", owner: "", audience: "",
+    triggers: "", body: "",
+  });
+  // undefined is the same shape.
+  assert.deepEqual(toFormFields(undefined), out);
+});
+
+test("toFormFields triggers array joins with ', '", () => {
+  assert.equal(toFormFields({ triggers: ["deploy", "rollback"] }).triggers, "deploy, rollback");
+  assert.equal(toFormFields({ triggers: ["only"] }).triggers, "only");
+  // Empty array is the empty string, not the string "[]".
+  assert.equal(toFormFields({ triggers: [] }).triggers, "");
+});
+
+// ---------- metaDiffRows ----------
+
+test("metaDiffRows identical → all same:true", () => {
+  const a = { title: "T", status: "active", tier: "B", owner: "x", audience: "ops", triggers: ["a", "b"], body: "ignored" };
+  const rows = metaDiffRows(a, { ...a });
+  assert.equal(rows.length, 6);
+  for (const r of rows) {
+    assert.equal(r.same, true, `field ${r.field}`);
+    assert.equal(r.a, r.b, `field ${r.field}`);
+  }
+});
+
+test("metaDiffRows EXACT field order and differing title/triggers flagged", () => {
+  const a = { title: "old", status: "active", tier: "B", owner: "alice", audience: "ops", triggers: ["a", "b"], body: "x" };
+  const b = { title: "new", status: "draft", tier: "B", owner: "alice", audience: "ops", triggers: ["a", "c"], body: "y" };
+  const rows = metaDiffRows(a, b);
+  // Pinned order: title, status, tier, owner, audience, triggers.
+  assert.deepEqual(rows.map((r) => r.field), ["title", "status", "tier", "owner", "audience", "triggers"]);
+  // title differs.
+  assert.deepEqual(rows[0], { field: "title", a: "old", b: "new", same: false });
+  // status differs.
+  assert.deepEqual(rows[1], { field: "status", a: "active", b: "draft", same: false });
+  // tier / owner / audience equal.
+  assert.equal(rows[2].same, true);
+  assert.equal(rows[3].same, true);
+  assert.equal(rows[4].same, true);
+  // triggers differ in the ", "-joined form.
+  assert.deepEqual(rows[5], { field: "triggers", a: "a, b", b: "a, c", same: false });
+});
+
+test("metaDiffRows attempted=null tolerated: all a=\"\" (except status=draft default)", () => {
+  const rows = metaDiffRows(null, { title: "x", status: "active", tier: "B", owner: "y", audience: "ops", triggers: [], body: "z" });
+  assert.equal(rows.length, 6);
+  // status defaults to "draft" on the attempted side per toFormFields;
+  // every other a-value is the empty string.
+  for (const r of rows) {
+    if (r.field === "status") {
+      assert.equal(r.a, "draft");
+    } else {
+      assert.equal(r.a, "", `field ${r.field} should be "" on the null side`);
+    }
+  }
+  // And the rows still have b values from current.
+  assert.equal(rows[0].b, "x");
+  assert.equal(rows[1].b, "active");
+});
+
+// ---------- resolvePayload ----------
+
+test("resolvePayload without save omits the save key", () => {
+  const out = resolvePayload("by hand", 1, null);
+  assert.deepEqual(out, { resolution: "by hand", expected_attempts: 1 });
+  // The save key is OMITTED — not present-as-null. JSON.stringify
+  // makes this distinction visible.
+  assert.equal(JSON.stringify(out), `{"resolution":"by hand","expected_attempts":1}`);
+});
+
+test("resolvePayload with undefined save also omits the save key", () => {
+  const out = resolvePayload("by hand", 1, undefined);
+  assert.equal("save" in out, false);
+});
+
+test("resolvePayload with save includes the save object", () => {
+  const save = { status: "active", body: "merged" };
+  const out = resolvePayload("merged", 2, save);
+  assert.deepEqual(out, {
+    resolution: "merged", expected_attempts: 2, save,
+  });
+});
+
+test("resolvePayload expected_attempts always present", () => {
+  for (const v of [0, 1, 5, 99]) {
+    const out = resolvePayload("r", v, null);
+    assert.equal(out.expected_attempts, v);
+  }
 });

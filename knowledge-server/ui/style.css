@@ -60,6 +60,15 @@ textarea { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 
 .muted { color: var(--muted); font-size: 0.9rem; }
 .error { color: var(--error); }
+/* Step-5 visibility fix: the legacy error banners (login-error,
+   newdoc-error, editor-error, publish-error) used to carry the
+   `hidden` attribute in index.html, but were only ever written
+   via setText, which never cleared `hidden`, and .error had no
+   CSS display override — so they were permanently invisible. The
+   HTML no longer carries `hidden` on those four elements; an
+   empty :empty banner now collapses to display:none. The
+   publish-lint banner keeps its explicit hidden toggling. */
+.error:empty { display: none; }
 
 table { border-collapse: collapse; width: 100%; }
 th, td {
@@ -107,3 +116,8 @@ ul#publish-diff li { padding: 0.2rem 0; }
 }
 .side-pane h4 { margin: 0 0 0.3rem 0; font-size: 0.9rem; color: var(--muted); }
 .side-pane .diff { margin: 0; }
+
+/* Step-5 conflict merge view: metadata-diff rows that differ get
+   a tinted background to match the diff del-bg color. Reuses the
+   existing --diff-del-bg variable so the change is one rule. */
+#conflict-meta-diff tr.changed td { background: var(--diff-del-bg); }

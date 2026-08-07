@@ -21,6 +21,8 @@ import {
   currentReleasePath, countWords, countBytes, parseTriggers,
   isExpectedContentHashShape, initialSaveState, afterSave, onConflict,
   lineDiff, manifestDiff,
+  conflictsPath, conflictPath, resolveConflictPath,
+  toFormFields, metaDiffRows, resolvePayload,
 } from "./lib.mjs";
 
 const TOKEN_KEY = "ks_token";
@@ -32,7 +34,7 @@ const state = {
   docs: [],
   filter: { collection: "", status: "", tier: "" },
   // editor state
-  current: null,           // { collection, family, version, saveState }
+  current: null,           // { collection, family, version, saveState, conflictId }
   // history view: list of DocMeta fetched on entry + the picked set
   historyVersions: [],
   historyPicked: new Set(),
@@ -41,6 +43,10 @@ const state = {
   publishCandidate: null,
   publishConfirmed: false,
   publishConfirmArmed: false, // true after first click on "Cut release"
+  // conflict surface (build-order step 5)
+  conflicts: [],
+  showResolved: false,
+  conflict: null, // { record, current /* Doc|null */, currentStatus /* 200|404|0 */ }
 };
 
 // ---------- init: register ALL persistent handlers once ----------
@@ -111,6 +117,30 @@ function registerPersistentHandlers() {
     showView("error");
     setText("error-text", "");
     boot();
+  });
+
+  // conflict surface (step 5)
+  on("nav-conflicts", "click", () => switchView("conflicts", refreshConflicts));
+  on("conflicts-show-resolved", "change", () => {
+    state.showResolved = byId("conflicts-show-resolved").checked;
+    refreshConflicts();
+  });
+  on("cf-go", "click", submitClaimFlag);
+  on("conflict-back", "click", () => switchView("conflicts", refreshConflicts));
+  on("mg-load-attempted", "click", () => {
+    if (!state.conflict) return;
+    populateMergeForm(toFormFields(state.conflict.record.attempted));
+  });
+  on("mg-load-current", "click", () => {
+    if (!state.conflict) return;
+    populateMergeForm(toFormFields(state.conflict.current));
+  });
+  on("conflict-resolve-save", "click", () => submitResolve(true));
+  on("conflict-resolve-keep", "click", () => submitResolve(false));
+  on("editor-merge", "click", () => {
+    if (state.current && state.current.conflictId != null) {
+      openConflict(state.current.conflictId);
+    }
   });
 }
 
@@ -278,10 +308,11 @@ async function submitNewDoc() {
 
 async function openEditor(collection, family, saveState) {
   showView("editor");
-  state.current = { collection, family, version: 0, saveState };
+  state.current = { collection, family, version: 0, saveState, conflictId: null };
   setText("editor-path", `${collection} / ${family}`);
   setText("editor-save-state", "");
   setText("editor-error", "");
+  byId("editor-merge").hidden = true;
   // Load latest version: omit ?version entirely so the API's "absent"
   // branch (which returns 404 for an unknown family) reaches the
   // new-doc branch here, and existing docs come back at max(version).
@@ -354,12 +385,20 @@ async function submitEditorSave() {
   if (r.status === 200) {
     state.current.saveState = afterSave(state.current.saveState, r.json.version);
     state.current.version = r.json.version;
+    state.current.conflictId = null;
+    byId("editor-merge").hidden = true;
     setText("editor-save-state", `v${r.json.version} (base ${r.json.version})`);
     setText("editor-error", "");
   } else if (r.status === 409) {
     setText("editor-error",
       `version changed on the server — reload to see the latest. detail: ${r.json && r.json.detail || ""}`);
     state.current.saveState = onConflict(state.current.saveState);
+    // Capture the conflict id (if the server committed a record)
+    // and surface the merge-view button. A 409 with no conflict_id
+    // (e.g. a future error envelope) leaves the button hidden.
+    const cid = r.json && typeof r.json.conflict_id === "number" ? r.json.conflict_id : null;
+    state.current.conflictId = cid;
+    byId("editor-merge").hidden = (cid == null);
   } else {
     setText("editor-error", `Save failed: HTTP ${r.status} ${r.body || ""}`);
   }
@@ -468,7 +507,7 @@ async function diffTwoVersions(collection, family, versions) {
   if (result.tooLarge) {
     out.hidden = true;
     fb.hidden = false;
-    renderSideBySide(fb, va, a.json.body, vb, b.json.body);
+    renderSideBySide(fb, `v${va}`, a.json.body, `v${vb}`, b.json.body);
     return;
   }
   fb.hidden = true;
@@ -483,18 +522,21 @@ async function diffTwoVersions(collection, family, versions) {
 }
 
 // renderSideBySide populates `container` with two read-only <pre>
-// panes laid out in a two-column grid. Static markup only; dynamic
-// values are inserted via textContent.
-function renderSideBySide(container, va, aBody, vb, bBody) {
+// panes laid out in a two-column grid. The labels are passed in
+// PRE-FORMATTED (the caller decides "v3" vs "attempted" vs "(none)")
+// so the same renderer serves the history diff, the publish diff,
+// and the conflict merge view. Static markup only; dynamic values
+// are inserted via textContent.
+function renderSideBySide(container, labelA, aBody, labelB, bBody) {
   container.classList.add("side-by-side");
   const left = document.createElement("div");
   const right = document.createElement("div");
   left.className = "side-pane";
   right.className = "side-pane";
   const leftH = document.createElement("h4");
-  leftH.textContent = `v${va}`;
+  leftH.textContent = labelA;
   const rightH = document.createElement("h4");
-  rightH.textContent = `v${vb}`;
+  rightH.textContent = labelB;
   const leftPre = document.createElement("pre");
   leftPre.className = "diff";
   leftPre.textContent = aBody;
@@ -585,18 +627,41 @@ async function confirmPublishCut() {
     state.publishCandidate = r.json;
     await refreshPublish();
   } else if (r.status === 409) {
-    // Stale candidate: do NOT auto-refresh. Leave the banner visible;
-    // the operator refreshes explicitly so they can review what
-    // changed. The stale hash is useless now, so the candidate is
-    // dropped and Cut stays disabled until the next refresh
-    // recomputes both — re-cutting the same stale hash would only
-    // clear this guidance and 409 again.
-    setText("publish-state", "candidate changed — refresh preview");
-    setText("publish-error", `Conflict: ${r.json && r.json.detail || ""}`);
-    hideEl("publish-confirm"); hideEl("publish-cancel");
-    state.publishConfirmArmed = false;
-    state.publishCandidate = null;
-    byId("publish-cut").disabled = true;
+    // Distinguish lint (kernel cap) from stale-hash (expected_content_hash
+    // mismatch). Both arrive as 409: the lint path carries a
+    // numeric conflict_id when a doc-scoped lint committed a
+    // policy record; the empty-release lint records nothing and
+    // carries no conflict_id. The stale-hash path carries
+    // error="conflict".
+    const env = r.json || {};
+    if (env.error === "lint") {
+      const cid = typeof env.conflict_id === "number" ? env.conflict_id : null;
+      setText("publish-state", cid != null
+        ? "lint failed — policy conflict recorded"
+        : "lint failed");
+      setText("publish-error", `Lint: ${env.detail || ""}` + (cid != null ? ` (conflict #${cid})` : ""));
+      hideEl("publish-confirm"); hideEl("publish-cancel");
+      state.publishConfirmArmed = false;
+      state.publishCandidate = null;
+      byId("publish-cut").disabled = true;
+    } else if (env.error === "conflict") {
+      // Stale candidate: do NOT auto-refresh. Leave the banner visible;
+      // the operator refreshes explicitly so they can review what
+      // changed. The stale hash is useless now, so the candidate is
+      // dropped and Cut stays disabled until the next refresh
+      // recomputes both — re-cutting the same stale hash would only
+      // clear this guidance and 409 again.
+      setText("publish-state", "candidate changed — refresh preview");
+      setText("publish-error", `Conflict: ${env.detail || ""}`);
+      hideEl("publish-confirm"); hideEl("publish-cancel");
+      state.publishConfirmArmed = false;
+      state.publishCandidate = null;
+      byId("publish-cut").disabled = true;
+    } else {
+      // 409 with unrecognized / null json — generic failure branch.
+      setText("publish-state", "");
+      setText("publish-error", `Cut failed: HTTP 409 ${r.body || ""}`);
+    }
   } else {
     setText("publish-state", "");
     setText("publish-error", `Cut failed: HTTP ${r.status} ${r.body || ""}`);
@@ -650,9 +715,13 @@ function renderPublishDiff() {
 async function renderChangedContentDiff(collection, family, oldVersion, newVersion) {
   const a = await apiFetch(encodePath(collection, family) + "?version=" + oldVersion, { method: "GET" });
   const b = await apiFetch(encodePath(collection, family) + "?version=" + newVersion, { method: "GET" });
+  // AuthFailure check FIRST: the previous order cleared the box
+  // before the check, so a 401 would leave the box empty and look
+  // like a successful load. This is the same authFailure-first rule
+  // as everywhere else.
+  if (a.authFailure || b.authFailure) return;
   const box = byId("publish-content-diff");
   box.replaceChildren();
-  if (a.authFailure || b.authFailure) return;
   if (a.status !== 200 || b.status !== 200) {
     const p = document.createElement("p");
     p.textContent = `fetch failed: ${a.status}/${b.status}`;
@@ -666,7 +735,7 @@ async function renderChangedContentDiff(collection, family, oldVersion, newVersi
     // Side-by-side for publish diff too — two read-only panes.
     const container = document.createElement("div");
     container.className = "side-by-side";
-    renderSideBySide(container, oldVersion, a.json.body, newVersion, b.json.body);
+    renderSideBySide(container, `v${oldVersion}`, a.json.body, `v${newVersion}`, b.json.body);
     box.appendChild(container);
     return;
   }
@@ -680,6 +749,279 @@ async function renderChangedContentDiff(collection, family, oldVersion, newVersi
     pre.appendChild(span);
   }
   box.appendChild(pre);
+}
+
+// ---------- conflicts (build-order step 5) ----------
+
+async function refreshConflicts() {
+  const r = await apiFetch(conflictsPath(state.showResolved ? "" : "open"), { method: "GET" });
+  if (r.authFailure) return;
+  if (r.status !== 200) {
+    showView("error");
+    setText("error-text", `Conflicts failed: HTTP ${r.status} ${r.body || ""}`);
+    return;
+  }
+  state.conflicts = (r.json && r.json.conflicts) || [];
+  renderConflictsList();
+}
+
+function renderConflictsList() {
+  const tbody = byId("conflicts-table").querySelector("tbody");
+  tbody.replaceChildren();
+  if (state.conflicts.length === 0) {
+    byId("conflicts-empty").hidden = false;
+    return;
+  }
+  byId("conflicts-empty").hidden = true;
+  for (const c of state.conflicts) {
+    const tr = document.createElement("tr");
+    const fields = [
+      String(c.id), c.kind, c.status,
+      c.collection + "/" + c.family_id,
+      c.other_collection ? c.other_collection + "/" + c.other_family_id : "",
+      String(c.attempts), c.detail, c.opened_by, c.opened_at,
+      c.resolved_by || "", c.resolution || "", c.winning_version != null ? String(c.winning_version) : "",
+    ];
+    for (const v of fields) {
+      const td = document.createElement("td");
+      td.textContent = v;
+      tr.appendChild(td);
+    }
+    const id = c.id;
+    tr.addEventListener("click", () => openConflict(id));
+    tbody.appendChild(tr);
+  }
+}
+
+async function submitClaimFlag() {
+  const collection = byId("cf-collection").value.trim();
+  const family = byId("cf-family").value.trim();
+  const otherCollection = byId("cf-other-collection").value.trim();
+  const otherFamily = byId("cf-other-family").value.trim();
+  const detail = byId("cf-detail").value.trim();
+  if (!collection || !family || !detail) {
+    setText("cf-error", "collection, family, and detail are required");
+    return;
+  }
+  const body = { collection, family_id: family, detail };
+  if (otherCollection) body.other_collection = otherCollection;
+  if (otherFamily) body.other_family_id = otherFamily;
+  const r = await apiFetch(conflictsPath(""), {
+    method: "POST",
+    body: JSON.stringify(body),
+    editor: state.editor,
+  });
+  if (r.authFailure) return;
+  if (r.status === 201) {
+    setText("cf-error", "");
+    byId("cf-collection").value = "";
+    byId("cf-family").value = "";
+    byId("cf-other-collection").value = "";
+    byId("cf-other-family").value = "";
+    byId("cf-detail").value = "";
+    await refreshConflicts();
+  } else if (r.status === 409) {
+    setText("cf-error", "already flagged (open conflict exists)");
+  } else {
+    setText("cf-error", `HTTP ${r.status} ${r.body || ""}`);
+  }
+}
+
+function populateMergeForm(fields) {
+  byId("mg-title").value = fields.title;
+  byId("mg-status").value = fields.status;
+  byId("mg-tier").value = fields.tier;
+  byId("mg-owner").value = fields.owner;
+  byId("mg-audience").value = fields.audience;
+  byId("mg-triggers").value = fields.triggers;
+  byId("mg-body").value = fields.body;
+}
+
+async function openConflict(id) {
+  // Entry reset: every flag touched by ANY branch is reset here
+  // first so no state leaks between successive conflict views.
+  state.conflict = null;
+  setText("conflict-error", "");
+  setText("conflict-state", "");
+  setText("conflict-record", "");
+  byId("conflict-diff").replaceChildren();
+  byId("conflict-diff").hidden = true;
+  byId("conflict-diff-fallback").replaceChildren();
+  byId("conflict-diff-fallback").hidden = true;
+  byId("conflict-meta-diff").querySelector("tbody").replaceChildren();
+  byId("conflict-resolution").value = "";
+  byId("conflict-resolution").hidden = false;
+  byId("conflict-merge").hidden = true;
+  byId("conflict-resolve-save").hidden = true;
+  byId("conflict-resolve-save").disabled = true;
+  byId("conflict-resolve-keep").hidden = false;
+  byId("conflict-resolve-keep").disabled = true;
+  byId("conflict-resolve-keep").textContent = "Resolve";
+  showView("conflict");
+
+  const r = await apiFetch(conflictPath(id), { method: "GET" });
+  if (r.authFailure) return;
+  if (r.status !== 200) {
+    setText("conflict-error", `Load failed: HTTP ${r.status} ${r.body || ""}`);
+    return;
+  }
+  const record = r.json;
+  state.conflict = { record, current: null, currentStatus: 0 };
+
+  setText("conflict-title",
+    `#${record.id} ${record.kind} ${record.status} — ${record.collection}/${record.family_id}`);
+  setText("conflict-record", JSON.stringify(record, null, 2));
+
+  if (record.status === "resolved") {
+    // Read-only audit view: hide both resolve buttons and the
+    // resolution input.
+    byId("conflict-resolution").hidden = true;
+    byId("conflict-resolve-keep").hidden = true;
+    byId("conflict-resolve-save").hidden = true;
+    return;
+  }
+
+  const enableResolve = () => {
+    byId("conflict-resolve-keep").disabled = false;
+    if (record.kind === "edit") {
+      byId("conflict-resolve-save").disabled = (state.conflict.currentStatus !== 200 && state.conflict.currentStatus !== 404);
+    }
+  };
+
+  if (record.kind !== "edit") {
+    // claim / policy: no current-doc fetch, both buttons always
+    // enabled while open.
+    byId("conflict-merge").hidden = true;
+    byId("conflict-resolve-save").hidden = true;
+    byId("conflict-resolve-keep").textContent = "Resolve";
+    enableResolve();
+    return;
+  }
+
+  // kind === "edit" AND status === "open" — show merge block, fetch
+  // current doc.
+  byId("conflict-merge").hidden = false;
+  byId("conflict-resolve-save").hidden = false;
+  byId("conflict-resolve-save").disabled = true; // enabled below on a good current fetch
+  byId("conflict-resolve-keep").textContent = "Keep current & resolve";
+  byId("conflict-resolve-keep").disabled = true; // enabled below
+
+  // Initialize merge form from attempted (the rejected payload).
+  populateMergeForm(toFormFields(record.attempted));
+
+  // The attempted column is the LATEST rejected save. Fetch the
+  // family's current state to render the diff.
+  let cur;
+  try {
+    cur = await apiFetch(encodePath(record.collection, record.family_id), { method: "GET" });
+  } catch (e) {
+    cur = { status: 0, body: String(e), json: null, authFailure: false };
+  }
+  if (cur.authFailure) return;
+
+  const diffPre = byId("conflict-diff");
+  const fb = byId("conflict-diff-fallback");
+  const metaTbody = byId("conflict-meta-diff").querySelector("tbody");
+
+  if (cur.status === 200) {
+    state.conflict.currentStatus = 200;
+    state.conflict.current = cur.json;
+    const attemptedBody = (record.attempted && record.attempted.body) || "";
+    const aLines = attemptedBody.split("\n");
+    const bLines = (cur.json.body || "").split("\n");
+    const result = lineDiff(aLines, bLines);
+    fb.replaceChildren();
+    if (result.tooLarge) {
+      diffPre.hidden = true;
+      fb.hidden = false;
+      renderSideBySide(fb, "attempted", attemptedBody, `v${cur.json.version}`, cur.json.body);
+    } else {
+      diffPre.hidden = false;
+      for (const row of result.rows) {
+        const span = document.createElement("span");
+        span.className = row.tag;
+        const prefix = row.tag === "add" ? "+ " : row.tag === "del" ? "- " : "  ";
+        span.textContent = prefix + row.text + "\n";
+        diffPre.appendChild(span);
+      }
+    }
+    // Metadata diff: differing rows get class "changed" on the <tr>.
+    const rows = metaDiffRows(record.attempted, cur.json);
+    metaTbody.replaceChildren();
+    for (const r of rows) {
+      const tr = document.createElement("tr");
+      if (!r.same) tr.classList.add("changed");
+      for (const v of [r.field, r.a, r.b]) {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      }
+      metaTbody.appendChild(tr);
+    }
+    // Initialize merge form from attempted; the operator can hit
+    // "Load current" or "Load attempted" to flip.
+    populateMergeForm(toFormFields(record.attempted));
+    enableResolve();
+  } else if (cur.status === 404) {
+    state.conflict.currentStatus = 404;
+    state.conflict.current = null;
+    setText("conflict-state", "family has no versions on the server");
+    const attemptedBody = (record.attempted && record.attempted.body) || "";
+    diffPre.hidden = true;
+    fb.hidden = false;
+    fb.replaceChildren();
+    renderSideBySide(fb, "attempted", attemptedBody, "(none)", "");
+    enableResolve();
+  } else {
+    // Anything else (or fetch exception) → fail closed: BOTH
+    // resolve buttons disabled.
+    state.conflict.currentStatus = 0;
+    setText("conflict-error", `current fetch failed: HTTP ${cur.status} ${cur.body || ""}`);
+  }
+}
+
+async function submitResolve(withSave) {
+  if (!state.conflict) return;
+  const record = state.conflict.record;
+  const resolution = byId("conflict-resolution").value.trim();
+  if (!resolution) {
+    setText("conflict-error", "resolution text is required");
+    return;
+  }
+  let save = null;
+  if (withSave) {
+    save = {
+      title: byId("mg-title").value,
+      status: byId("mg-status").value,
+      tier: byId("mg-tier").value,
+      triggers: parseTriggers(byId("mg-triggers").value),
+      owner: byId("mg-owner").value,
+      audience: byId("mg-audience").value,
+      body: byId("mg-body").value,
+    };
+    // base_version is the precondition the server uses: omit on
+    // the 404 path (no family rows exist), include the current
+    // version when one is present.
+    if (state.conflict.currentStatus === 200 && state.conflict.current) {
+      save.base_version = state.conflict.current.version;
+    }
+  }
+  const r = await apiFetch(resolveConflictPath(record.id), {
+    method: "POST",
+    body: JSON.stringify(resolvePayload(resolution, record.attempts, save)),
+    editor: state.editor,
+  });
+  if (r.authFailure) return;
+  if (r.status === 200) {
+    switchView("conflicts", refreshConflicts);
+  } else if (r.status === 409) {
+    setText("conflict-error", "changed on the server — reloading");
+    // Re-run openConflict to refresh all panes (covers both a
+    // refreshed attempt and a stale merge base).
+    openConflict(record.id);
+  } else {
+    setText("conflict-error", `HTTP ${r.status} ${r.body || ""}`);
+  }
 }
 
 // ---------- shared fetch + DOM helpers ----------
@@ -721,7 +1063,7 @@ async function apiFetch(path, opts) {
 }
 
 function showView(name) {
-  for (const v of ["login", "browse", "newdoc", "editor", "history", "publish", "error"]) {
+  for (const v of ["login", "browse", "newdoc", "editor", "history", "publish", "conflicts", "conflict", "error"]) {
     byId("view-" + v).hidden = (v !== name);
   }
 }

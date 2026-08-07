@@ -33,6 +33,28 @@ export function currentReleasePath(host) {
   return "/api/releases/current" + (host ? "?host=" + encodeURIComponent(host) : "");
 }
 
+// conflictsPath: list endpoint. Empty (or falsy) status → unfiltered
+// list; otherwise the query is "?status=" + encodeURIComponent.
+// No-status form is the literal "/api/conflicts", NOT
+// "/api/conflicts?status=" — the wire form is pinned.
+export function conflictsPath(status) {
+  if (!status) return "/api/conflicts";
+  return "/api/conflicts?status=" + encodeURIComponent(status);
+}
+
+// conflictPath: single record by id. Numeric id is the only path
+// shape the server accepts (other forms 400 invalid); the
+// String(id) makes the type explicit and avoids a number-vs-string
+// split in callers.
+export function conflictPath(id) {
+  return "/api/conflicts/" + encodeURIComponent(String(id));
+}
+
+// resolveConflictPath: append "/resolve" to the single-record path.
+export function resolveConflictPath(id) {
+  return conflictPath(id) + "/resolve";
+}
+
 // countWords matches Go strings.Fields closely enough for the kernel
 // lint advisory: splits on Unicode whitespace, drops empties.
 // Verified in lib_test.mjs against pinned character classes.
@@ -94,6 +116,61 @@ export function afterSave(state, responseVersion) {
 // (and to retry with, after a manual reload).
 export function onConflict(state) {
   return state;
+}
+
+// toFormFields converts a server Doc (or null) into the plain-string
+// shape the merge form uses. The order matches the form's row order;
+// the merge form's 7 input fields are filled positionally. triggers
+// becomes ", "-joined; null/undefined fields become "". Nullish
+// docLike returns the all-empty shape with status "draft" (a fresh
+// family has no rows to populate from).
+export function toFormFields(docLike) {
+  if (!docLike) {
+    return { title: "", status: "draft", tier: "", owner: "", audience: "", triggers: "", body: "" };
+  }
+  return {
+    title: docLike.title == null ? "" : String(docLike.title),
+    status: docLike.status == null ? "draft" : String(docLike.status),
+    tier: docLike.tier == null ? "" : String(docLike.tier),
+    owner: docLike.owner == null ? "" : String(docLike.owner),
+    audience: docLike.audience == null ? "" : String(docLike.audience),
+    triggers: Array.isArray(docLike.triggers) ? docLike.triggers.join(", ") : "",
+    body: docLike.body == null ? "" : String(docLike.body),
+  };
+}
+
+// metaDiffRows compares the metadata fields of two doc-like values
+// over EXACTLY these 6 fields, in this order: title, status, tier,
+// owner, audience, triggers. (body is diffed separately, never
+// here.) triggers is compared/displayed in the ", "-joined string
+// form, so a server [a,b] and form "a, b" line up. Each row is
+// {field, a, b, same}. Both inputs are passed through toFormFields
+// so null and missing fields are normalized to "". The order is
+// pinned — the UI renders rows into a table tbody in sequence and
+// the unit test asserts the exact 6 names in this order.
+export function metaDiffRows(attempted, current) {
+  const a = toFormFields(attempted);
+  const b = toFormFields(current);
+  const fields = ["title", "status", "tier", "owner", "audience", "triggers"];
+  return fields.map((f) => ({
+    field: f,
+    a: a[f],
+    b: b[f],
+    same: a[f] === b[f],
+  }));
+}
+
+// resolvePayload shapes the body sent to POST /api/conflicts/{id}/resolve.
+// {resolution, expected_attempts} is always present; the save key is
+// included only when save is non-null/non-undefined, matching the
+// brief's "save key omitted when null/undefined" wire form. The
+// server decodes the same way: present-and-non-null populates the
+// field; absent-or-null leaves it nil.
+export function resolvePayload(resolution, expectedAttempts, save) {
+  if (save == null) {
+    return { resolution, expected_attempts: expectedAttempts };
+  }
+  return { resolution, expected_attempts: expectedAttempts, save };
 }
 
 // lineDiff runs LCS over two arrays of lines. Returns:

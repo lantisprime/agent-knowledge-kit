@@ -281,3 +281,96 @@ func TestUILeavesAPIAuthIntact(t *testing.T) {
 		t.Fatalf("/ with auth enabled: status=%d, want 200 (shell is public)", resp.StatusCode)
 	}
 }
+
+// TestUIConflictBannersAndButtons — the step-5 UI changes: the four
+// legacy error banners (login-error, newdoc-error, editor-error,
+// publish-error) no longer carry the `hidden` attribute (visibility
+// now follows the :empty CSS rule, not the static attribute);
+// conflict-resolve-save and conflict-resolve-keep DO carry `disabled`
+// (read-only audit view + initial-state reset); nav-conflicts and
+// editor-merge exist as buttons. style.css carries the .error:empty
+// rule that backs the fix.
+func TestUIConflictBannersAndButtons(t *testing.T) {
+	ts := newUIOnlyFixture(t)
+
+	// Index.
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	idxBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := string(idxBody)
+
+	// The four legacy error banners must NOT carry `hidden` anymore.
+	// A banner like `<p id="login-error" class="error" hidden>` would
+	// fail; the new shape is `<p id="login-error" class="error">`.
+	for _, id := range []string{"login-error", "newdoc-error", "editor-error", "publish-error"} {
+		// Find the <p id="…"> line and confirm it does NOT contain
+		// the `hidden` attribute. A simple substring check is fine
+		// here because the four ids are unique and the test is
+		// pinning one specific wire change.
+		open := "<p id=\"" + id + "\" class=\"error\""
+		idx2 := strings.Index(idx, open)
+		if idx2 < 0 {
+			t.Fatalf("missing banner open tag for %q", id)
+		}
+		// Walk to the closing '>'.
+		end := strings.Index(idx[idx2:], ">")
+		if end < 0 {
+			t.Fatalf("malformed banner tag for %q", id)
+		}
+		tag := idx[idx2 : idx2+end+1]
+		if strings.Contains(tag, "hidden") {
+			t.Fatalf("%s still carries the hidden attribute: %q", id, tag)
+		}
+	}
+
+	// conflict-resolve-save and conflict-resolve-keep carry disabled.
+	for _, id := range []string{"conflict-resolve-save", "conflict-resolve-keep"} {
+		open := "<button id=\"" + id + "\" type=\"button\""
+		idx2 := strings.Index(idx, open)
+		if idx2 < 0 {
+			t.Fatalf("missing button open tag for %q", id)
+		}
+		end := strings.Index(idx[idx2:], ">")
+		if end < 0 {
+			t.Fatalf("malformed button tag for %q", id)
+		}
+		tag := idx[idx2 : idx2+end+1]
+		if !strings.Contains(tag, "disabled") {
+			t.Fatalf("%s must carry the disabled attribute: %q", id, tag)
+		}
+	}
+
+	// nav-conflicts and editor-merge exist as buttons.
+	for _, id := range []string{"nav-conflicts", "editor-merge"} {
+		open := "<button id=\"" + id + "\""
+		if !strings.Contains(idx, open) {
+			t.Fatalf("missing button #%s in index.html", id)
+		}
+	}
+
+	// style.css carries the .error:empty rule.
+	resp, err = http.Get(ts.URL + "/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("style.css status=%d", resp.StatusCode)
+	}
+	cssBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cssBody), ".error:empty") {
+		t.Fatalf("style.css missing .error:empty rule")
+	}
+}

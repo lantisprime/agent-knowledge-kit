@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -97,6 +98,35 @@ CREATE TABLE IF NOT EXISTS host_tokens (
   token_hash TEXT NOT NULL UNIQUE,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS conflicts (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind             TEXT NOT NULL CHECK (kind IN ('edit','claim','policy')),
+  status           TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved')),
+  collection       TEXT NOT NULL,
+  family_id        TEXT NOT NULL,
+  other_collection TEXT NOT NULL DEFAULT '',
+  other_family_id  TEXT NOT NULL DEFAULT '',
+  base_version     INTEGER NOT NULL DEFAULT 0,
+  their_version    INTEGER NOT NULL DEFAULT 0,
+  attempts         INTEGER NOT NULL DEFAULT 1 CHECK (attempts >= 1),
+  attempted        TEXT NOT NULL DEFAULT '',
+  detail           TEXT NOT NULL DEFAULT '',
+  opened_by        TEXT NOT NULL DEFAULT '',
+  opened_at        TEXT NOT NULL,
+  resolved_by      TEXT NOT NULL DEFAULT '',
+  resolved_at      TEXT NOT NULL DEFAULT '',
+  resolution       TEXT NOT NULL DEFAULT '',
+  winning_version  INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_conflict_per_kind_family
+  ON conflicts (kind, collection, family_id) WHERE status = 'open';
+CREATE TRIGGER IF NOT EXISTS conflicts_no_delete
+  BEFORE DELETE ON conflicts
+  BEGIN SELECT RAISE(ABORT, 'conflicts are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS conflicts_no_rewrite
+  BEFORE UPDATE ON conflicts WHEN OLD.status = 'resolved'
+  BEGIN SELECT RAISE(ABORT, 'resolved conflicts are immutable'); END;
 `
 
 type Store struct {
@@ -164,6 +194,53 @@ type Doc struct {
 	Body     string   `json:"body"`
 }
 
+// ConflictMeta is the list-view row: per the brief, no attempted
+// payload is exposed here. The omitempty on optional fields keeps
+// claim/policy rows from advertising zero-valued bookends.
+type ConflictMeta struct {
+	ID              int64  `json:"id"`
+	Kind            string `json:"kind"`
+	Status          string `json:"status"`
+	Collection      string `json:"collection"`
+	FamilyID        string `json:"family_id"`
+	OtherCollection string `json:"other_collection,omitempty"`
+	OtherFamilyID   string `json:"other_family_id,omitempty"`
+	BaseVersion     int    `json:"base_version,omitempty"`
+	TheirVersion    int    `json:"their_version,omitempty"`
+	Attempts        int    `json:"attempts"`
+	Detail          string `json:"detail"`
+	OpenedBy        string `json:"opened_by"`
+	OpenedAt        string `json:"opened_at"`
+	ResolvedBy      string `json:"resolved_by,omitempty"`
+	ResolvedAt      string `json:"resolved_at,omitempty"`
+	Resolution      string `json:"resolution,omitempty"`
+	WinningVersion  int    `json:"winning_version,omitempty"`
+}
+
+// Conflict is the full record view. Attempted carries the LATEST
+// rejected DocSave for edit conflicts; for claim/policy rows and for
+// empty attempted columns it stays nil. v1 retains only the latest
+// rejected payload — the attempts counter is the durable record that
+// earlier attempts occurred.
+type Conflict struct {
+	ConflictMeta
+	Attempted *DocSave `json:"attempted,omitempty"`
+}
+
+// ConflictRecordedError carries the id of the conflict record that
+// was committed alongside a rejected operation. Unwrap surfaces the
+// wrapped ErrConflict / ErrLint so the existing errors.Is mapping is
+// unchanged — the API layer's writeErr translates ErrConflict/ErrLint
+// to the same 409 status, and the API adds a conflict_id field only
+// when errors.As(err, &cre) matches.
+type ConflictRecordedError struct {
+	ID  int64
+	Err error
+}
+
+func (e *ConflictRecordedError) Error() string { return e.Err.Error() }
+func (e *ConflictRecordedError) Unwrap() error { return e.Err }
+
 func Open(path string) (*Store, error) {
 	// WAL + busy_timeout + a single in-process connection make
 	// SQLITE_BUSY structurally impossible for the v1 single-writer
@@ -221,21 +298,16 @@ func validateIdent(field, value string) error {
 	return nil
 }
 
-// SaveDoc inserts a new immutable version. Saving as active demotes
-// the previous active version to superseded in the same transaction.
-// When BaseVersion is non-nil it is the optimistic-lock base: the save
-// proceeds only if the current MAX(version) for (collection, family)
-// equals *BaseVersion. A stale base returns ErrConflict. nil opts out
-// of the check and restores last-writer-wins.
-func (s *Store) SaveDoc(collection, family string, in DocSave) (DocVersion, error) {
-	if err := validateIdent("collection", collection); err != nil {
-		return DocVersion{}, err
-	}
-	if err := validateIdent("family", family); err != nil {
-		return DocVersion{}, err
-	}
+// validateDocSave enforces the SaveDoc field constraints that are
+// independent of any database lookup: status enum, trigger grammar,
+// and (caller-validated) idents. Status and trigger grammar live
+// here so ResolveConflict's save path can reuse the same checks; the
+// idents are validated by SaveDoc's caller (the route handler) and
+// by ResolveConflict (which also validates them before reaching the
+// save path).
+func validateDocSave(in DocSave) error {
 	if in.Status != "draft" && in.Status != "active" {
-		return DocVersion{}, fmt.Errorf("%w: status must be draft or active", ErrInvalid)
+		return fmt.Errorf("%w: status must be draft or active", ErrInvalid)
 	}
 	// Trigger grammar is closed at the write door: the stored form is a
 	// comma-joined string, so any value containing ',' or empty value
@@ -243,18 +315,23 @@ func (s *Store) SaveDoc(collection, family string, in DocSave) (DocVersion, erro
 	// rather than silently joining and re-splitting a lossy form.
 	for _, t := range in.Triggers {
 		if t == "" {
-			return DocVersion{}, fmt.Errorf("%w: trigger values must be non-empty", ErrInvalid)
+			return fmt.Errorf("%w: trigger values must be non-empty", ErrInvalid)
 		}
 		if strings.Contains(t, ",") {
-			return DocVersion{}, fmt.Errorf("%w: trigger %q contains ','", ErrInvalid, t)
+			return fmt.Errorf("%w: trigger %q contains ','", ErrInvalid, t)
 		}
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return DocVersion{}, err
-	}
-	defer tx.Rollback()
+	return nil
+}
 
+// saveDocTx is the post-validation body of SaveDoc: collection-exists
+// check, current-version read, stale-base check (returning plain
+// ErrConflict — NO conflict recording at this layer; the caller
+// orchestrates the record-and-commit dance), supersede-update, insert.
+// Must be called inside a transaction; never touches s.db (the store
+// pool is pinned to one connection and a concurrent s.db call would
+// deadlock).
+func (s *Store) saveDocTx(tx *sql.Tx, collection, family string, in DocSave) (DocVersion, error) {
 	var exists int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM collections WHERE name = ?`, collection).Scan(&exists); err != nil {
 		return DocVersion{}, err
@@ -288,13 +365,125 @@ func (s *Store) SaveDoc(collection, family string, in DocSave) (DocVersion, erro
 		in.Tier, strings.Join(in.Triggers, ","), in.Body, in.Editor, created); err != nil {
 		return DocVersion{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return DocVersion{}, err
-	}
 	return DocVersion{
 		Collection: collection, FamilyID: family, Version: next,
 		Status: in.Status, CreatedAt: created, Editor: in.Editor,
 	}, nil
+}
+
+// SaveDoc inserts a new immutable version. Saving as active demotes
+// the previous active version to superseded in the same transaction.
+// When BaseVersion is non-nil it is the optimistic-lock base: the save
+// proceeds only if the current MAX(version) for (collection, family)
+// equals *BaseVersion. A stale base returns a ConflictRecordedError
+// wrapping ErrConflict — a conflict record is committed alongside the
+// rejection so the merge view has the rejected payload to render and
+// any tab can pick the open conflict up. nil opts out of the check
+// and restores last-writer-wins (no conflict is recorded in that
+// branch).
+func (s *Store) SaveDoc(collection, family string, in DocSave) (DocVersion, error) {
+	if err := validateIdent("collection", collection); err != nil {
+		return DocVersion{}, err
+	}
+	if err := validateIdent("family", family); err != nil {
+		return DocVersion{}, err
+	}
+	if err := validateDocSave(in); err != nil {
+		return DocVersion{}, err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return DocVersion{}, err
+	}
+	defer tx.Rollback()
+
+	v, err := s.saveDocTx(tx, collection, family, in)
+	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return DocVersion{}, err
+		}
+		return v, nil
+	}
+	if !errors.Is(err, ErrConflict) || in.BaseVersion == nil {
+		return DocVersion{}, err
+	}
+	// Stale base: saveDocTx rejects BEFORE any write, so the open tx
+	// holds only reads. Record the conflict row in this SAME tx and
+	// commit it — the recorded their_version and the version check
+	// share one snapshot, and no second Begin is ever needed (a second
+	// Begin while this tx is alive would deadlock the single-connection
+	// pool).
+	id, recErr := s.upsertEditConflictTx(tx, collection, family, in)
+	if recErr != nil {
+		return DocVersion{}, recErr
+	}
+	if cErr := tx.Commit(); cErr != nil {
+		return DocVersion{}, cErr
+	}
+	return DocVersion{}, &ConflictRecordedError{ID: id, Err: err}
+}
+
+// upsertEditConflictTx records (or refreshes) the open edit conflict
+// for (collection, family) inside the CALLER's transaction. Dedup is
+// the SELECT-then-INSERT/UPDATE shape pinned by the brief: the partial
+// unique index one_open_conflict_per_kind_family refuses a second open
+// row for the same (kind,collection,family), and the check-then-act is
+// safe because the store is the only opener of this database file
+// (SetMaxOpenConns(1) plus the component contract). A second
+// connection could race this — the comment is left in deliberately as
+// the regression marker if that ever changes.
+func (s *Store) upsertEditConflictTx(tx *sql.Tx, collection, family string, in DocSave) (int64, error) {
+	var current int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM doc_versions
+		WHERE collection = ? AND family_id = ?`, collection, family).Scan(&current); err != nil {
+		return 0, err
+	}
+
+	attempted, err := json.Marshal(in)
+	if err != nil {
+		return 0, fmt.Errorf("marshal rejected DocSave: %w", err)
+	}
+
+	var existingID int64
+	err = tx.QueryRow(`SELECT id FROM conflicts
+		WHERE kind = 'edit' AND status = 'open' AND collection = ? AND family_id = ?`,
+		collection, family).Scan(&existingID)
+	if err == nil {
+		// The open row reflects the LATEST rejected attempt: every
+		// attempt-scoped field refreshes, including base_version — a
+		// later attempt from a different stale base must not leave the
+		// first attempt's base in the audit row.
+		if _, err := tx.Exec(`UPDATE conflicts
+			SET base_version = ?, their_version = ?, attempts = attempts + 1,
+			    attempted = ?, detail = ?, opened_by = ?, opened_at = ?
+			WHERE id = ?`,
+			*in.BaseVersion, current, string(attempted),
+			fmt.Sprintf("save with stale base_version %d (current %d)", *in.BaseVersion, current),
+			in.Editor, now(), existingID); err != nil {
+			return 0, err
+		}
+		return existingID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+
+	res, err := tx.Exec(`INSERT INTO conflicts
+		(kind, status, collection, family_id, other_collection, other_family_id,
+		 base_version, their_version, attempts, attempted, detail, opened_by, opened_at)
+		VALUES ('edit', 'open', ?, ?, '', '', ?, ?, 1, ?, ?, ?, ?)`,
+		collection, family, *in.BaseVersion, current, string(attempted),
+		fmt.Sprintf("save with stale base_version %d (current %d)", *in.BaseVersion, current),
+		in.Editor, now())
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 // relDoc carries the per-doc slice of a release candidate. id is the
@@ -307,6 +496,23 @@ type relDoc struct {
 	family  string
 	body    string
 }
+
+// lintError is the typed wrapper that releaseCandidate returns for
+// a doc-scoped kernel lint. It unwraps to ErrLint (so the existing
+// errors.Is(err, ErrLint) → 409 mapping keeps working in the API
+// layer), and carries the offending (collection, family, version,
+// reason) so CutRelease can auto-record a policy conflict. The
+// empty-release lint does NOT use this type: it carries no doc, so
+// no conflict row can be opened for it.
+type lintError struct {
+	Collection string
+	Family     string
+	Version    int
+	Reason     string
+}
+
+func (e *lintError) Error() string { return e.Reason }
+func (e *lintError) Unwrap() error { return ErrLint }
 
 // releaseCandidate computes the would-be release manifest inside the
 // caller's transaction. It returns the manifest with ReleaseID == 0
@@ -341,13 +547,17 @@ func (s *Store) releaseCandidate(tx *sql.Tx) (Manifest, []relDoc, error) {
 		if collection == "kernel" {
 			if len(d.body) > KernelByteCap {
 				rows.Close()
-				return Manifest{}, nil, fmt.Errorf("%w: kernel %q exceeds %d-byte cap",
-					ErrLint, d.family, KernelByteCap)
+				return Manifest{}, nil, &lintError{
+					Collection: collection, Family: d.family, Version: d.version,
+					Reason: fmt.Sprintf("kernel %q exceeds %d-byte cap", d.family, KernelByteCap),
+				}
 			}
 			if len(strings.Fields(d.body)) > KernelWordCap {
 				rows.Close()
-				return Manifest{}, nil, fmt.Errorf("%w: kernel %q exceeds %d-word cap",
-					ErrLint, d.family, KernelWordCap)
+				return Manifest{}, nil, &lintError{
+					Collection: collection, Family: d.family, Version: d.version,
+					Reason: fmt.Sprintf("kernel %q exceeds %d-word cap", d.family, KernelWordCap),
+				}
 			}
 		}
 		docs = append(docs, d)
@@ -357,6 +567,9 @@ func (s *Store) releaseCandidate(tx *sql.Tx) (Manifest, []relDoc, error) {
 		return Manifest{}, nil, err
 	}
 	if len(docs) == 0 {
+		// Empty-release lint carries no doc: it MUST NOT carry a
+		// (collection, family) context, and CutRelease therefore
+		// must not record a policy conflict for this case.
 		return Manifest{}, nil, fmt.Errorf("%w: release would be empty", ErrLint)
 	}
 
@@ -395,7 +608,23 @@ func (s *Store) PreviewRelease() (Manifest, error) {
 // When expectedHash is non-empty the candidate content_hash must match
 // it exactly; a mismatch returns ErrConflict and cuts nothing. Pass
 // "" to opt out (the unconditional legacy behavior).
-func (s *Store) CutRelease(expectedHash string) (Manifest, error) {
+//
+// A doc-scoped kernel lint (byte or word cap) auto-opens a policy
+// conflict for the offending (collection, family). releaseCandidate
+// rejects BEFORE any write, so the open tx holds only reads and the
+// row is recorded in the SAME tx and committed — no second Begin (a
+// second Begin while this tx is alive would deadlock the single-
+// connection pool). The ConflictRecordedError wraps the typed ErrLint
+// so the API layer reports it as 409 lint with a numeric conflict_id.
+// The empty-release lint carries no doc and records nothing.
+//
+// On success, every open policy conflict is resolved in the same tx
+// as the release insert: resolution="cleared by release <id>",
+// resolved_by=editor, and winning_version = the family's version
+// listed in the new release's manifest (0 when the family is not in
+// the manifest, e.g. demoted to draft before the cut). Edit and claim
+// conflicts are NOT touched.
+func (s *Store) CutRelease(expectedHash, editorName string) (Manifest, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Manifest{}, err
@@ -404,6 +633,19 @@ func (s *Store) CutRelease(expectedHash string) (Manifest, error) {
 
 	manifest, docs, err := s.releaseCandidate(tx)
 	if err != nil {
+		var le *lintError
+		if errors.Is(err, ErrLint) && errors.As(err, &le) && le.Collection != "" {
+			// releaseCandidate rejected before any write: the tx holds
+			// only reads, so record the policy row here and commit it.
+			id, recErr := s.upsertPolicyConflictTx(tx, le.Collection, le.Family, le.Version, editorName, le.Reason)
+			if recErr != nil {
+				return Manifest{}, recErr
+			}
+			if cErr := tx.Commit(); cErr != nil {
+				return Manifest{}, cErr
+			}
+			return Manifest{}, &ConflictRecordedError{ID: id, Err: err}
+		}
 		return Manifest{}, err
 	}
 	if expectedHash != "" && manifest.ContentHash != expectedHash {
@@ -424,10 +666,97 @@ func (s *Store) CutRelease(expectedHash string) (Manifest, error) {
 			return Manifest{}, err
 		}
 	}
+	// Resolve every open policy conflict in the same tx as the
+	// release insert. winning_version = the version of this family's
+	// entry in the new manifest (0 when the family is not in the
+	// manifest). Already-resolved rows are not touched; the trigger
+	// refuses rewrites of resolved rows so a second successful cut
+	// cannot mutate them.
+	manifestByCollection := map[string]map[string]int{}
+	for _, d := range manifest.Docs {
+		col := strings.SplitN(d.Path, "/", 2)[0]
+		if _, ok := manifestByCollection[col]; !ok {
+			manifestByCollection[col] = map[string]int{}
+		}
+		manifestByCollection[col][d.FamilyID] = d.Version
+	}
+	rows, err := tx.Query(`SELECT id, collection, family_id FROM conflicts
+		WHERE kind = 'policy' AND status = 'open'`)
+	if err != nil {
+		return Manifest{}, err
+	}
+	type policyRow struct {
+		id         int64
+		collection string
+		family     string
+	}
+	var policies []policyRow
+	for rows.Next() {
+		var p policyRow
+		if err := rows.Scan(&p.id, &p.collection, &p.family); err != nil {
+			rows.Close()
+			return Manifest{}, err
+		}
+		policies = append(policies, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return Manifest{}, err
+	}
+	resolvedAt := now()
+	for _, p := range policies {
+		wv := 0
+		if fams, ok := manifestByCollection[p.collection]; ok {
+			wv = fams[p.family]
+		}
+		if _, err := tx.Exec(`UPDATE conflicts
+			SET status = 'resolved', resolved_by = ?, resolved_at = ?,
+			    resolution = ?, winning_version = ?
+			WHERE id = ? AND status = 'open'`,
+			editorName, resolvedAt,
+			fmt.Sprintf("cleared by release %d", manifest.ReleaseID), wv, p.id); err != nil {
+			return Manifest{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// upsertPolicyConflictTx records (or refreshes) the open policy
+// conflict for (collection, family) inside the CALLER's transaction.
+// Dedup is the same SELECT-then-INSERT/UPDATE shape as
+// upsertEditConflictTx: a partial unique index on (kind='policy',
+// collection, family_id) refuses a second open row for the same
+// family, and the check-then-act is safe under SetMaxOpenConns(1).
+func (s *Store) upsertPolicyConflictTx(tx *sql.Tx, collection, family string, version int, editorName, reason string) (int64, error) {
+	var existingID int64
+	err := tx.QueryRow(`SELECT id FROM conflicts
+		WHERE kind = 'policy' AND status = 'open' AND collection = ? AND family_id = ?`,
+		collection, family).Scan(&existingID)
+	if err == nil {
+		if _, err := tx.Exec(`UPDATE conflicts
+			SET their_version = ?, attempts = attempts + 1,
+			    detail = ?, opened_by = ?, opened_at = ?
+			WHERE id = ?`,
+			version, reason, editorName, now(), existingID); err != nil {
+			return 0, err
+		}
+		return existingID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	res, err := tx.Exec(`INSERT INTO conflicts
+		(kind, status, collection, family_id, other_collection, other_family_id,
+		 base_version, their_version, attempts, attempted, detail, opened_by, opened_at)
+		VALUES ('policy', 'open', ?, ?, '', '', 0, ?, 1, '', ?, ?, ?)`,
+		collection, family, version, reason, editorName, now())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 // ListDocs returns one DocMeta per family: the max-version row of
@@ -731,4 +1060,329 @@ func (s *Store) ResyncPending(host string) (bool, error) {
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// scanConflictMeta reads one conflict row's list-view fields. The
+// schema is shared between ListConflicts (no attempted) and the
+// per-row resolve path (also no attempted); the get/flag/resolve
+// methods that need the attempted column read it separately.
+func scanConflictMeta(row interface {
+	Scan(...any) error
+}) (ConflictMeta, error) {
+	var c ConflictMeta
+	var attempted string
+	if err := row.Scan(
+		&c.ID, &c.Kind, &c.Status,
+		&c.Collection, &c.FamilyID,
+		&c.OtherCollection, &c.OtherFamilyID,
+		&c.BaseVersion, &c.TheirVersion,
+		&c.Attempts, &attempted,
+		&c.Detail,
+		&c.OpenedBy, &c.OpenedAt,
+		&c.ResolvedBy, &c.ResolvedAt,
+		&c.Resolution, &c.WinningVersion,
+	); err != nil {
+		return ConflictMeta{}, err
+	}
+	return c, nil
+}
+
+// ListConflicts returns one ConflictMeta per conflict row, newest
+// first (ORDER BY id DESC). status "" returns all rows; "open" or
+// "resolved" filter accordingly; any other value is ErrInvalid. An
+// empty store returns a non-nil empty slice so the JSON wire form is
+// "[]", never "null". List rows carry NO attempted payload — callers
+// that need the rejected DocSave call GetConflict.
+func (s *Store) ListConflicts(status string) ([]ConflictMeta, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	switch status {
+	case "":
+		rows, err = s.db.Query(`SELECT id, kind, status,
+			collection, family_id, other_collection, other_family_id,
+			base_version, their_version, attempts, attempted,
+			detail, opened_by, opened_at,
+			resolved_by, resolved_at, resolution, winning_version
+			FROM conflicts ORDER BY id DESC`)
+	case "open", "resolved":
+		rows, err = s.db.Query(`SELECT id, kind, status,
+			collection, family_id, other_collection, other_family_id,
+			base_version, their_version, attempts, attempted,
+			detail, opened_by, opened_at,
+			resolved_by, resolved_at, resolution, winning_version
+			FROM conflicts WHERE status = ? ORDER BY id DESC`, status)
+	default:
+		return nil, fmt.Errorf("%w: status must be '', 'open', or 'resolved'", ErrInvalid)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ConflictMeta{}
+	for rows.Next() {
+		c, err := scanConflictMeta(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// GetConflict returns the full Conflict for one id. Unknown id →
+// ErrNotFound. attempted column non-empty → unmarshal into
+// Attempted; an unmarshal failure surfaces as a plain (non-typed)
+// error, so the API layer maps it to 500 internal — it means we
+// wrote a bad row, never silently swallowed.
+func (s *Store) GetConflict(id int64) (Conflict, error) {
+	var (
+		c         Conflict
+		attempted string
+	)
+	err := s.db.QueryRow(`SELECT id, kind, status,
+		collection, family_id, other_collection, other_family_id,
+		base_version, their_version, attempts, attempted,
+		detail, opened_by, opened_at,
+		resolved_by, resolved_at, resolution, winning_version
+		FROM conflicts WHERE id = ?`, id).
+		Scan(
+			&c.ID, &c.Kind, &c.Status,
+			&c.Collection, &c.FamilyID,
+			&c.OtherCollection, &c.OtherFamilyID,
+			&c.BaseVersion, &c.TheirVersion,
+			&c.Attempts, &attempted,
+			&c.Detail,
+			&c.OpenedBy, &c.OpenedAt,
+			&c.ResolvedBy, &c.ResolvedAt,
+			&c.Resolution, &c.WinningVersion,
+		)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Conflict{}, ErrNotFound
+	}
+	if err != nil {
+		return Conflict{}, err
+	}
+	if attempted != "" {
+		var ds DocSave
+		if err := json.Unmarshal([]byte(attempted), &ds); err != nil {
+			return Conflict{}, fmt.Errorf("conflict %d attempted column: %w", id, err)
+		}
+		c.Attempted = &ds
+	}
+	return c, nil
+}
+
+// FlagClaimConflict opens a manual claim-conflict record. The (other_*)
+// pair is optional: both empty is the "single-doc claim" form. When
+// present the two pairs are canonicalized by lex order so A→B and
+// B→A dedup to the same primary family. A second open claim against
+// the canonicalized primary is ErrConflict; in that case the operator
+// should fold the second other-home into the existing row's detail.
+//
+// Returns the created record.
+func (s *Store) FlagClaimConflict(collection, family, otherCollection, otherFamily, detail, openedBy string) (Conflict, error) {
+	if err := validateIdent("collection", collection); err != nil {
+		return Conflict{}, err
+	}
+	if err := validateIdent("family", family); err != nil {
+		return Conflict{}, err
+	}
+	trimmedDetail := strings.TrimSpace(detail)
+	if trimmedDetail == "" {
+		return Conflict{}, fmt.Errorf("%w: detail is required", ErrInvalid)
+	}
+	// The other pair is optional but must be all-or-nothing: half-set
+	// (one field non-empty, the other empty) is an obvious client
+	// bug, so reject up front.
+	hasOther := otherCollection != "" || otherFamily != ""
+	if hasOther {
+		if otherCollection == "" || otherFamily == "" {
+			return Conflict{}, fmt.Errorf("%w: other pair must be fully set or fully empty", ErrInvalid)
+		}
+		if err := validateIdent("other_collection", otherCollection); err != nil {
+			return Conflict{}, err
+		}
+		if err := validateIdent("other_family", otherFamily); err != nil {
+			return Conflict{}, err
+		}
+		// No self-claims: the other pair must reference a different doc.
+		if otherCollection == collection && otherFamily == family {
+			return Conflict{}, fmt.Errorf("%w: claim conflict must reference two distinct docs", ErrInvalid)
+		}
+		// Canonicalize: the (post-swap) primary is the lex-smaller
+		// pair. After canonicalization, A→B and B→A both write to
+		// the same primary (A).
+		if otherCollection < collection ||
+			(otherCollection == collection && otherFamily < family) {
+			collection, otherCollection = otherCollection, collection
+			family, otherFamily = otherFamily, family
+		}
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Conflict{}, err
+	}
+	defer tx.Rollback()
+
+	// Snapshot versions at flag time (absent families → 0).
+	var baseVersion, theirVersion int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM doc_versions
+		WHERE collection = ? AND family_id = ?`, collection, family).Scan(&baseVersion); err != nil {
+		return Conflict{}, err
+	}
+	if hasOther {
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM doc_versions
+			WHERE collection = ? AND family_id = ?`, otherCollection, otherFamily).Scan(&theirVersion); err != nil {
+			return Conflict{}, err
+		}
+	}
+
+	var existingID int64
+	err = tx.QueryRow(`SELECT id FROM conflicts
+		WHERE kind = 'claim' AND status = 'open' AND collection = ? AND family_id = ?`,
+		collection, family).Scan(&existingID)
+	if err == nil {
+		// Duplicate open claim. The operator should fold additional
+		// other-homes into the existing row's detail; the API layer
+		// surfaces this as 409 so the UI can guide the operator.
+		return Conflict{}, fmt.Errorf("%w: open claim already exists for (%s/%s)", ErrConflict, collection, family)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Conflict{}, err
+	}
+
+	res, err := tx.Exec(`INSERT INTO conflicts
+		(kind, status, collection, family_id, other_collection, other_family_id,
+		 base_version, their_version, attempts, attempted, detail, opened_by, opened_at)
+		VALUES ('claim', 'open', ?, ?, ?, ?, ?, ?, 1, '', ?, ?, ?)`,
+		collection, family,
+		otherCollection, otherFamily,
+		baseVersion, theirVersion,
+		trimmedDetail, openedBy, now())
+	if err != nil {
+		return Conflict{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Conflict{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Conflict{}, err
+	}
+	return s.GetConflict(id)
+}
+
+// ResolveConflict resolves a conflict record. One transaction.
+//
+//   - Load the row; unknown id → ErrNotFound; status == 'resolved'
+//     → ErrConflict "already resolved".
+//   - resolution := strings.TrimSpace(resolution); empty after trim →
+//     ErrInvalid. A padded resolution is stored trimmed.
+//   - expectedAttempts < 0 skips the precondition (internal paths
+//     only — the API rejects < 1). expectedAttempts >= 0 must equal
+//     the row's attempts, else ErrConflict "conflict changed —
+//     reload" (nothing written). attempts is CHECK >= 1 so a passed
+//     0 can never match — fail-closed.
+//   - save != nil: legal only for kind='edit' (else ErrInvalid "save
+//     applies to edit conflicts only"). Run validateDocSave +
+//     saveDocTx(tx, c, f, *save) in this tx. A stale base inside
+//     resolve returns plain ErrConflict — the conflict row is
+//     untouched, the tx is rolled back, NOTHING is recorded.
+//     winning_version = the new doc version.
+//   - save == nil: winning_version = current MAX(version) of the
+//     (collection, family) (0 when the family has no versions). For
+//     kind='policy' a manual resolve always writes winning_version=0
+//     (only a clearing cut knows a release version).
+//   - Set resolved_by, resolved_at=now(), resolution,
+//     winning_version, status='resolved'. Return the updated full
+//     record.
+func (s *Store) ResolveConflict(id int64, resolution string, expectedAttempts int, save *DocSave, resolvedBy string) (Conflict, error) {
+	resolution = strings.TrimSpace(resolution)
+	if resolution == "" {
+		return Conflict{}, fmt.Errorf("%w: resolution is required", ErrInvalid)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Conflict{}, err
+	}
+	defer tx.Rollback()
+
+	var (
+		c         ConflictMeta
+		attempted string
+	)
+	err = tx.QueryRow(`SELECT id, kind, status,
+		collection, family_id, other_collection, other_family_id,
+		base_version, their_version, attempts, attempted,
+		detail, opened_by, opened_at,
+		resolved_by, resolved_at, resolution, winning_version
+		FROM conflicts WHERE id = ?`, id).
+		Scan(
+			&c.ID, &c.Kind, &c.Status,
+			&c.Collection, &c.FamilyID,
+			&c.OtherCollection, &c.OtherFamilyID,
+			&c.BaseVersion, &c.TheirVersion,
+			&c.Attempts, &attempted,
+			&c.Detail,
+			&c.OpenedBy, &c.OpenedAt,
+			&c.ResolvedBy, &c.ResolvedAt,
+			&c.Resolution, &c.WinningVersion,
+		)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Conflict{}, ErrNotFound
+	}
+	if err != nil {
+		return Conflict{}, err
+	}
+	if c.Status == "resolved" {
+		return Conflict{}, fmt.Errorf("%w: already resolved", ErrConflict)
+	}
+	if expectedAttempts >= 0 && expectedAttempts != c.Attempts {
+		return Conflict{}, fmt.Errorf("%w: conflict changed — reload", ErrConflict)
+	}
+
+	winning := 0
+	switch {
+	case save != nil:
+		if c.Kind != "edit" {
+			return Conflict{}, fmt.Errorf("%w: save applies to edit conflicts only", ErrInvalid)
+		}
+		if err := validateDocSave(*save); err != nil {
+			return Conflict{}, err
+		}
+		v, err := s.saveDocTx(tx, c.Collection, c.FamilyID, *save)
+		if err != nil {
+			// saveDocTx returns plain ErrConflict on stale base;
+			// the brief says the tx is rolled back, the conflict
+			// row is untouched, nothing recorded. The deferred
+			// tx.Rollback() handles the cleanup.
+			return Conflict{}, err
+		}
+		winning = v.Version
+	default:
+		if c.Kind != "policy" {
+			if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM doc_versions
+				WHERE collection = ? AND family_id = ?`, c.Collection, c.FamilyID).Scan(&winning); err != nil {
+				return Conflict{}, err
+			}
+		}
+		// Policy manual resolve: winning stays 0. Only a clearing
+		// cut knows the release version of the family.
+	}
+
+	if _, err := tx.Exec(`UPDATE conflicts
+		SET status = 'resolved', resolved_by = ?, resolved_at = ?,
+		    resolution = ?, winning_version = ?
+		WHERE id = ? AND status = 'open'`,
+		resolvedBy, now(), resolution, winning, id); err != nil {
+		return Conflict{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Conflict{}, err
+	}
+	return s.GetConflict(id)
 }
