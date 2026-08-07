@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"agent-knowledge-kit/knowledge-server/store"
 )
@@ -40,6 +41,7 @@ func newMux(st *store.Store, auth *authState) *http.ServeMux {
 	mux.HandleFunc("GET /api/releases/{id}/archive", a.secure(false, a.archive))
 	mux.HandleFunc("POST /api/heartbeats", a.secure(false, a.heartbeat))
 	mux.HandleFunc("POST /api/hosts/{host}/resync", a.secure(true, a.requestResync))
+	mux.HandleFunc("GET /api/hosts", a.secure(true, a.listHosts))
 	mux.HandleFunc("POST /api/hosts/{host}/token", a.secure(true, a.issueToken))
 	mux.HandleFunc("DELETE /api/hosts/{host}/token", a.secure(true, a.revokeToken))
 	mux.HandleFunc("GET /api/conflicts", a.secure(true, a.listConflicts))
@@ -343,6 +345,35 @@ func (a *api) requestResync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// listHosts returns one HostStatus per known host (union of
+// heartbeats, pending resyncs, and issued tokens), the latest
+// release id, and a server-clock `now` for the UI to compute
+// heartbeat age against the same clock that stamped `seen_at`.
+// Operator-only via secure. No release cut yet → latest_release_id
+// is 0 (ErrNotFound from CurrentRelease is mapped to 0, not an
+// error). now is RFC3339 UTC; the store stamps seen_at and
+// requested_at in the same format.
+func (a *api) listHosts(w http.ResponseWriter, r *http.Request) {
+	hosts, err := a.st.ListHosts()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	latest := int64(0)
+	cur, err := a.st.CurrentRelease()
+	if err == nil {
+		latest = cur.ReleaseID
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hosts":             hosts,
+		"latest_release_id": latest,
+		"now":               time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 func (a *api) heartbeat(w http.ResponseWriter, r *http.Request) {

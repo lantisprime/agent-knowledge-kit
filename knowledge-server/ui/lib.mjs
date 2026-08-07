@@ -55,6 +55,166 @@ export function resolveConflictPath(id) {
   return conflictPath(id) + "/resolve";
 }
 
+// hostsPath: fleet-page read. Operator-only.
+export const hostsPath = "/api/hosts";
+
+// hostResyncPath: per-host force-resync POST. The host segment is
+// percent-encoded so a name with characters the URL grammar would
+// otherwise mangle still produces a valid URL; the server's {host}
+// pattern matches the decoded value.
+export function hostResyncPath(host) {
+  return "/api/hosts/" + encodeURIComponent(host) + "/resync";
+}
+
+// DARK_AFTER_MS: a host is dark after 5 minutes without a heartbeat
+// — 5× the subscriber's default 60s poll interval, so one or two
+// missed polls (server restart, transient network) do not flap the
+// status.
+export const DARK_AFTER_MS = 5 * 60 * 1000;
+
+// SKEW_TOLERANCE_MS: how far into the future of the server's `now`
+// a seen_at may sit and still be trusted. Both stamps come from the
+// same server clock, but a heartbeat can land between the DB read
+// and the `now` stamp, so a slightly-future seen_at is normal. A
+// seen_at MORE than this ahead means clock rollback or a restored
+// snapshot — the host's freshness is unknowable, and unknowable must
+// read as dark, never current.
+export const SKEW_TOLERANCE_MS = 30 * 1000;
+
+// fleetStatus classifies one HostStatus row as exactly one of
+// "dark" | "stale" | "current". Decision order is pinned:
+//   1. !row.seen_at (absent/empty)            → "dark"  (never heartbeated)
+//   2. Date.parse(row.seen_at) is NaN         → "dark"  (unparseable = unknown)
+//   3. age = nowMs - seenMs;
+//      age < -SKEW_TOLERANCE_MS               → "dark"  (far-future stamp:
+//      clock rollback / snapshot restore; fail dark, not current)
+//   4. -SKEW_TOLERANCE_MS <= age < 0 → clamp age to 0 (benign in-flight
+//      heartbeat between the DB read and the `now` stamp)
+//   5. age > DARK_AFTER_MS                    → "dark"  (STRICTLY greater:
+//      age exactly at the boundary is not dark)
+//   6. !row.ok                                → "stale" (alive but failing)
+//   7. row.release_id !== latestReleaseID     → "stale" (alive, behind)
+//   8. otherwise                              → "current"
+// Note rule 7 uses plain !== including latestReleaseID === 0: a host
+// that heartbeated ok against a server with no releases reports
+// release_id 0 and is "current" (converged with an empty server).
+export function fleetStatus(row, latestReleaseID, nowMs) {
+  if (!row || typeof row.seen_at !== "string" || row.seen_at === "") {
+    return "dark";
+  }
+  const seenMs = Date.parse(row.seen_at);
+  if (!Number.isFinite(seenMs)) {
+    return "dark";
+  }
+  const rawAge = nowMs - seenMs;
+  if (rawAge < -SKEW_TOLERANCE_MS) {
+    return "dark";
+  }
+  const age = rawAge < 0 ? 0 : rawAge;
+  if (age > DARK_AFTER_MS) {
+    return "dark";
+  }
+  if (!row.ok) {
+    return "stale";
+  }
+  if (row.release_id !== latestReleaseID) {
+    return "stale";
+  }
+  return "current";
+}
+
+// formatAge returns a human age label, largest unit only, floored:
+// negative or < 1000 → "0s"; then "Ns" (< 60s), "Nm" (< 60m), "Nh"
+// (< 24h), "Nd" (no upper cutoff — 48h is "2d"). Pure arithmetic,
+// no Date access.
+export function formatAge(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 1000) return "0s";
+  const sec = Math.floor(n / 1000);
+  if (sec < 60) return sec + "s";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + "m";
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return hr + "h";
+  const day = Math.floor(hr / 24);
+  return day + "d";
+}
+
+// parseFleetResponse validates and normalizes the GET /api/hosts
+// response body. Returns { hosts, latestReleaseID, nowMs } on
+// success, null on ANY failure — the caller treats null as
+// "malformed fleet response" and keeps its previous state.
+export function parseFleetResponse(json) {
+  if (!json || typeof json !== "object" || Array.isArray(json)) return null;
+  if (!Array.isArray(json.hosts)) return null;
+  if (!Number.isSafeInteger(json.latest_release_id) || json.latest_release_id < 0) return null;
+  if (typeof json.now !== "string" || !json.now.endsWith("Z")) return null;
+  if (!Number.isFinite(Date.parse(json.now))) return null;
+  for (const host of json.hosts) {
+    if (!host || typeof host !== "object" || Array.isArray(host)) return null;
+    if (typeof host.host !== "string" || host.host === "") return null;
+    if (!Number.isSafeInteger(host.release_id) || host.release_id < 0) return null;
+    if (typeof host.ok !== "boolean") return null;
+    for (const k of ["error", "seen_at", "resync_requested_at", "token_created_at"]) {
+      // Optional means "absent (undefined) or a string": a property
+      // explicitly set to undefined is equivalent to absent, so test
+      // the VALUE, not key presence (`in` would reject {seen_at:
+      // undefined}, which the contract permits).
+      if (host[k] !== undefined && typeof host[k] !== "string") return null;
+    }
+  }
+  return { hosts: json.hosts, latestReleaseID: json.latest_release_id, nowMs: Date.parse(json.now) };
+}
+
+// fleetRowCells returns { status, cells } for one fleet table row.
+// status is the fleetStatus(...) value; cells is an array of
+// EXACTLY 7 strings in the table's column order (all columns except
+// the actions column).
+export function fleetRowCells(row, latestReleaseID, nowMs) {
+  const status = fleetStatus(row, latestReleaseID, nowMs);
+  const release = row.seen_at ? String(row.release_id) : "";
+  const seenMs = row.seen_at ? Date.parse(row.seen_at) : NaN;
+  let lastSeen;
+  if (!row.seen_at) {
+    lastSeen = "(never)";
+  } else if (!Number.isFinite(seenMs)) {
+    lastSeen = row.seen_at;
+  } else {
+    lastSeen = row.seen_at + " (" + formatAge(nowMs - seenMs) + " ago)";
+  }
+  const cells = [
+    row.host,
+    status,
+    release,
+    lastSeen,
+    row.error || "",
+    row.resync_requested_at || "",
+    row.token_created_at || "",
+  ];
+  return { status, cells };
+}
+
+// fleetSummary returns the fleet-summary line. Empty hosts array →
+// "" (the app shows the fleet-empty element instead). Otherwise:
+//
+//   "<n> host(s) — <c> current, <s> stale, <d> dark · latest release <id>"
+//
+// with "latest release (none)" when latestReleaseID is 0. Counts
+// come from fleetStatus over each row. Pluralize with the bare
+// "host(s)" literal (no grammar logic).
+export function fleetSummary(hosts, latestReleaseID, nowMs) {
+  if (!Array.isArray(hosts) || hosts.length === 0) return "";
+  let current = 0, stale = 0, dark = 0;
+  for (const row of hosts) {
+    const s = fleetStatus(row, latestReleaseID, nowMs);
+    if (s === "current") current++;
+    else if (s === "stale") stale++;
+    else dark++;
+  }
+  const releaseLabel = latestReleaseID === 0 ? "latest release (none)" : "latest release " + latestReleaseID;
+  return hosts.length + " host(s) — " + current + " current, " + stale + " stale, " + dark + " dark · " + releaseLabel;
+}
+
 // countWords matches Go strings.Fields closely enough for the kernel
 // lint advisory: splits on Unicode whitespace, drops empties.
 // Verified in lib_test.mjs against pinned character classes.

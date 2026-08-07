@@ -22,6 +22,7 @@ import {
   isExpectedContentHashShape, initialSaveState, afterSave, onConflict,
   lineDiff, manifestDiff,
   conflictsPath, conflictPath, resolveConflictPath,
+  hostsPath, hostResyncPath, parseFleetResponse, fleetRowCells, fleetSummary,
   toFormFields, metaDiffRows, resolvePayload,
 } from "./lib.mjs";
 
@@ -47,6 +48,9 @@ const state = {
   conflicts: [],
   showResolved: false,
   conflict: null, // { record, current /* Doc|null */, currentStatus /* 200|404|0 */ }
+  // fleet surface (build-order step 6)
+  fleet: null, // { hosts, latestReleaseID, nowMs }
+  fleetGen: 0, // refresh generation counter; see refreshFleet
 };
 
 // ---------- init: register ALL persistent handlers once ----------
@@ -142,6 +146,10 @@ function registerPersistentHandlers() {
       openConflict(state.current.conflictId);
     }
   });
+
+  // fleet surface (step 6)
+  on("nav-fleet", "click", () => switchView("fleet", refreshFleet));
+  on("fleet-refresh", "click", refreshFleet);
 }
 
 // ---------- bootstrap ----------
@@ -1024,6 +1032,82 @@ async function submitResolve(withSave) {
   }
 }
 
+// ---------- fleet (build-order step 6) ----------
+
+async function refreshFleet() {
+  // Generation guard: a concurrent refresh (nav click, Refresh, or
+  // the post-resync refresh) must not let a stale response touch
+  // state or the DOM. The guard is verified by code review; the
+  // static+pure test posture has no async harness to unit-test it.
+  const gen = ++state.fleetGen;
+  const r = await apiFetch(hostsPath, { method: "GET" });
+  if (gen !== state.fleetGen) return;
+  if (r.authFailure) return;
+  if (r.status !== 200) {
+    showView("error");
+    setText("error-text", `Fleet failed: HTTP ${r.status} ${r.body || ""}`);
+    return;
+  }
+  const fleet = parseFleetResponse(r.json);
+  if (!fleet) {
+    setText("fleet-error", "malformed fleet response");
+    return;
+  }
+  state.fleet = fleet;
+  setText("fleet-error", "");
+  renderFleet();
+}
+
+function renderFleet() {
+  const tbody = byId("fleet-table").querySelector("tbody");
+  tbody.replaceChildren();
+  const fleet = state.fleet;
+  if (!fleet || !fleet.hosts || fleet.hosts.length === 0) {
+    byId("fleet-empty").hidden = false;
+    setText("fleet-summary", "");
+    return;
+  }
+  byId("fleet-empty").hidden = true;
+  setText("fleet-summary", fleetSummary(fleet.hosts, fleet.latestReleaseID, fleet.nowMs));
+  for (const row of fleet.hosts) {
+    const { status, cells } = fleetRowCells(row, fleet.latestReleaseID, fleet.nowMs);
+    const tr = document.createElement("tr");
+    for (let i = 0; i < cells.length; i++) {
+      const td = document.createElement("td");
+      td.textContent = cells[i];
+      if (i === 1) td.className = "status-" + status;
+      tr.appendChild(td);
+    }
+    // Actions column: per-row closure over `host` is safe — the <tr>
+    // is discarded by replaceChildren() on the next render.
+    const host = row.host;
+    const actionsTd = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Force resync";
+    btn.addEventListener("click", () => submitResync(host));
+    actionsTd.appendChild(btn);
+    tr.appendChild(actionsTd);
+    tbody.appendChild(tr);
+  }
+}
+
+async function submitResync(host) {
+  const r = await apiFetch(hostResyncPath(host), {
+    method: "POST",
+    editor: state.editor,
+  });
+  if (r.authFailure) return;
+  if (r.status === 204) {
+    // No direct DOM mutation here: refreshFleet clears fleet-error
+    // only after its response validates, preserving any current
+    // diagnostic until the refreshed state is actually known-good.
+    refreshFleet();
+    return;
+  }
+  setText("fleet-error", "resync failed: HTTP " + r.status + " " + (r.body || ""));
+}
+
 // ---------- shared fetch + DOM helpers ----------
 
 // apiFetch returns { status, body, json, authFailure }. When a 401
@@ -1063,7 +1147,7 @@ async function apiFetch(path, opts) {
 }
 
 function showView(name) {
-  for (const v of ["login", "browse", "newdoc", "editor", "history", "publish", "conflicts", "conflict", "error"]) {
+  for (const v of ["login", "browse", "newdoc", "editor", "history", "publish", "conflicts", "conflict", "fleet", "error"]) {
     byId("view-" + v).hidden = (v !== name);
   }
 }

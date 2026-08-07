@@ -1062,6 +1062,62 @@ func (s *Store) ResyncPending(host string) (bool, error) {
 	return n > 0, nil
 }
 
+// HostStatus is one fleet-page row: the union of everything the server
+// knows about a host — last heartbeat, pending force-resync, token
+// issuance. A host appears if it exists in ANY of the three tables; a
+// host the server has never heard of (no heartbeat, no resync request,
+// no token) does not exist as far as the fleet is concerned.
+// SeenAt == "" means the host has never heartbeated (ReleaseID/OK/Error
+// are zero-valued and meaningless in that case — consumers must check
+// SeenAt first). ResyncRequestedAt == "" means no resync is pending.
+// TokenCreatedAt == "" means no token has been issued.
+type HostStatus struct {
+	Host              string `json:"host"`
+	ReleaseID         int64  `json:"release_id"`
+	OK                bool   `json:"ok"`
+	Error             string `json:"error,omitempty"`
+	SeenAt            string `json:"seen_at,omitempty"`
+	ResyncRequestedAt string `json:"resync_requested_at,omitempty"`
+	TokenCreatedAt    string `json:"token_created_at,omitempty"`
+}
+
+// ListHosts returns one HostStatus per known host, ordered by host name.
+// Union across heartbeats, resync_requests, and host_tokens; absent
+// fields coalesce to zero values. Empty store → non-nil empty slice
+// (wire form "[]", never "null"). Read-only: no ident validation, no
+// transaction needed.
+func (s *Store) ListHosts() ([]HostStatus, error) {
+	rows, err := s.db.Query(`
+		SELECT u.host,
+		       COALESCE(h.release_id, 0), COALESCE(h.ok, 0),
+		       COALESCE(h.error, ''), COALESCE(h.seen_at, ''),
+		       COALESCE(r.requested_at, ''), COALESCE(t.created_at, '')
+		FROM (SELECT host FROM heartbeats
+		      UNION SELECT host FROM resync_requests
+		      UNION SELECT host FROM host_tokens) u
+		LEFT JOIN heartbeats       h ON h.host = u.host
+		LEFT JOIN resync_requests  r ON r.host = u.host
+		LEFT JOIN host_tokens      t ON t.host = u.host
+		ORDER BY u.host`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []HostStatus{}
+	for rows.Next() {
+		var hs HostStatus
+		var okInt int
+		if err := rows.Scan(&hs.Host, &hs.ReleaseID, &okInt,
+			&hs.Error, &hs.SeenAt,
+			&hs.ResyncRequestedAt, &hs.TokenCreatedAt); err != nil {
+			return nil, err
+		}
+		hs.OK = okInt != 0
+		out = append(out, hs)
+	}
+	return out, rows.Err()
+}
+
 // scanConflictMeta reads one conflict row's list-view fields. The
 // schema is shared between ListConflicts (no attempted) and the
 // per-row resolve path (also no attempted); the get/flag/resolve

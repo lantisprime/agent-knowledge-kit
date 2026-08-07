@@ -10,6 +10,8 @@ import {
   isExpectedContentHashShape, initialSaveState, afterSave, onConflict,
   lineDiff, manifestDiff,
   conflictsPath, conflictPath, resolveConflictPath,
+  hostsPath, hostResyncPath, DARK_AFTER_MS, SKEW_TOLERANCE_MS,
+  fleetStatus, formatAge, fleetRowCells, fleetSummary, parseFleetResponse,
   toFormFields, metaDiffRows, resolvePayload,
 } from "./lib.mjs";
 
@@ -438,4 +440,336 @@ test("resolvePayload expected_attempts always present", () => {
     const out = resolvePayload("r", v, null);
     assert.equal(out.expected_attempts, v);
   }
+});
+
+// ---------- hostsPath / hostResyncPath ----------
+
+test("hostsPath is the literal /api/hosts", () => {
+  assert.equal(hostsPath, "/api/hosts");
+});
+
+test("hostResyncPath encodes host (plain and percent-encoding)", () => {
+  assert.equal(hostResyncPath("h1"), "/api/hosts/h1/resync");
+  // Name with characters that need percent-encoding: the URL grammar
+  // would otherwise mangle them; the server's {host} pattern matches
+  // the decoded value.
+  assert.equal(hostResyncPath("a b/c"), "/api/hosts/a%20b%2Fc/resync");
+  assert.equal(hostResyncPath("with space"), "/api/hosts/with%20space/resync");
+});
+
+// ---------- DARK_AFTER_MS / SKEW_TOLERANCE_MS pinned constants ----------
+
+test("DARK_AFTER_MS is 5 minutes", () => {
+  assert.equal(DARK_AFTER_MS, 300000);
+});
+
+test("SKEW_TOLERANCE_MS is 30 seconds", () => {
+  assert.equal(SKEW_TOLERANCE_MS, 30000);
+});
+
+// ---------- fleetStatus: every branch ----------
+
+const NOW = Date.parse("2026-08-07T12:00:00Z");
+const freshSeen = "2026-08-07T11:59:30Z"; // 30s before NOW
+const exactlyBoundary = "2026-08-07T11:55:00Z"; // exactly 5 min before NOW
+const justInsideBoundary = "2026-08-07T11:55:01Z"; // 4m59s before NOW
+const justOutsideBoundary = "2026-08-07T11:54:59Z"; // 5m1s before NOW
+
+test("fleetStatus: no seen_at → dark", () => {
+  assert.equal(fleetStatus({ host: "h", ok: true, release_id: 1 }, 1, NOW), "dark");
+  assert.equal(fleetStatus({ host: "h", release_id: 1 }, 1, NOW), "dark");
+  assert.equal(fleetStatus({ host: "h", seen_at: "" }, 1, NOW), "dark");
+});
+
+test("fleetStatus: unparseable seen_at → dark", () => {
+  assert.equal(fleetStatus({ host: "h", seen_at: "not-a-date", ok: true, release_id: 1 }, 1, NOW), "dark");
+  // Empty string from the server is "absent" per the brief; the
+  // field presence with a non-empty but unparseable value is the
+  // branch the test pins here.
+});
+
+test("fleetStatus: age exactly DARK_AFTER_MS is NOT dark (strict boundary)", () => {
+  // exactly 5 min old → age === DARK_AFTER_MS, NOT > DARK_AFTER_MS.
+  assert.equal(fleetStatus({ host: "h", seen_at: exactlyBoundary, ok: true, release_id: 1 }, 1, NOW), "current");
+});
+
+test("fleetStatus: age DARK_AFTER_MS + 1 → dark", () => {
+  // Exact millisecond boundary: the same seen_at that is NOT dark at
+  // NOW must flip dark at NOW + 1 (age === DARK_AFTER_MS + 1ms). A
+  // threshold that is off by even 1ms fails here; the 1s-out case
+  // below is kept as the coarser regression.
+  assert.equal(fleetStatus({ host: "h", seen_at: exactlyBoundary, ok: true, release_id: 1 }, 1, NOW + 1), "dark");
+  assert.equal(fleetStatus({ host: "h", seen_at: justOutsideBoundary, ok: true, release_id: 1 }, 1, NOW), "dark");
+});
+
+test("fleetStatus: age just inside boundary → not dark; ok=false → stale", () => {
+  assert.equal(fleetStatus({ host: "h", seen_at: justInsideBoundary, ok: false, release_id: 1 }, 1, NOW), "stale");
+});
+
+test("fleetStatus: ok=true but release behind latest → stale", () => {
+  assert.equal(fleetStatus({ host: "h", seen_at: freshSeen, ok: true, release_id: 0 }, 1, NOW), "stale");
+});
+
+test("fleetStatus: ok=true + current release + fresh → current", () => {
+  assert.equal(fleetStatus({ host: "h", seen_at: freshSeen, ok: true, release_id: 1 }, 1, NOW), "current");
+});
+
+test("fleetStatus: latestReleaseID 0 and release_id 0 → current", () => {
+  // No release cut yet; a host that heartbeated ok against that
+  // server reports release_id 0 and is "current" (converged with an
+  // empty server).
+  assert.equal(fleetStatus({ host: "h", seen_at: freshSeen, ok: true, release_id: 0 }, 0, NOW), "current");
+});
+
+test("fleetStatus: seen_at 10s ahead of now (within tolerance) clamps, classifies by ok/release", () => {
+  // Within SKEW_TOLERANCE_MS the in-flight heartbeat is treated as
+  // benign; the host is classified by ok/release rules, not by the
+  // far-future stamp.
+  const future = "2026-08-07T12:00:10Z"; // 10s ahead of NOW; within 30s tolerance
+  assert.equal(fleetStatus({ host: "h", seen_at: future, ok: true, release_id: 1 }, 1, NOW), "current");
+  assert.equal(fleetStatus({ host: "h", seen_at: future, ok: false, release_id: 1 }, 1, NOW), "stale");
+});
+
+test("fleetStatus: seen_at more than SKEW_TOLERANCE_MS ahead → dark", () => {
+  // 10 min ahead of NOW — far beyond the 30s tolerance. The host's
+  // freshness is unknowable; unknowable must read as dark, never
+  // current.
+  const farFuture = "2026-08-07T12:10:00Z";
+  assert.equal(fleetStatus({ host: "h", seen_at: farFuture, ok: true, release_id: 1 }, 1, NOW), "dark");
+});
+
+// ---------- formatAge ----------
+
+test("formatAge: negative and < 1000 are 0s", () => {
+  assert.equal(formatAge(-1000), "0s");
+  assert.equal(formatAge(0), "0s");
+  assert.equal(formatAge(999), "0s");
+});
+
+test("formatAge: seconds, minutes, hours, days", () => {
+  assert.equal(formatAge(1000), "1s");
+  assert.equal(formatAge(59 * 1000), "59s");
+  assert.equal(formatAge(60 * 1000), "1m");
+  assert.equal(formatAge(59 * 60 * 1000), "59m");
+  assert.equal(formatAge(60 * 60 * 1000), "1h");
+  assert.equal(formatAge(23 * 60 * 60 * 1000), "23h");
+  assert.equal(formatAge(24 * 60 * 60 * 1000), "1d");
+  assert.equal(formatAge(48 * 60 * 60 * 1000), "2d");
+});
+
+test("formatAge: floor behavior (90s → 1m)", () => {
+  assert.equal(formatAge(90 * 1000), "1m");
+});
+
+// ---------- fleetRowCells ----------
+
+test("fleetRowCells: heartbeated host → 7 cells with release, age, error/resync/token passthrough", () => {
+  const row = {
+    host: "h1",
+    release_id: 7,
+    ok: true,
+    seen_at: freshSeen,
+    error: "boom",
+    resync_requested_at: "2026-08-07T11:00:00Z",
+    token_created_at: "2026-08-07T10:00:00Z",
+  };
+  const { status, cells } = fleetRowCells(row, 7, NOW);
+  assert.equal(status, "current");
+  assert.equal(cells.length, 7);
+  assert.equal(cells[0], "h1");
+  assert.equal(cells[1], "current");
+  assert.equal(cells[2], "7");
+  assert.equal(cells[3], freshSeen + " (30s ago)");
+  assert.equal(cells[4], "boom");
+  assert.equal(cells[5], "2026-08-07T11:00:00Z");
+  assert.equal(cells[6], "2026-08-07T10:00:00Z");
+});
+
+test("fleetRowCells: never-seen token-only host → release \"\" and last seen \"(never)\"", () => {
+  const row = {
+    host: "tok",
+    release_id: 0,
+    ok: false,
+    token_created_at: "2026-08-07T10:00:00Z",
+  };
+  const { status, cells } = fleetRowCells(row, 0, NOW);
+  assert.equal(status, "dark");
+  assert.equal(cells[0], "tok");
+  // release cell is "" because seen_at is absent.
+  assert.equal(cells[2], "");
+  // last seen is the literal "(never)".
+  assert.equal(cells[3], "(never)");
+  // error/resync passthrough as empty.
+  assert.equal(cells[4], "");
+  assert.equal(cells[5], "");
+  assert.equal(cells[6], "2026-08-07T10:00:00Z");
+});
+
+test("fleetRowCells: unparseable seen_at → rendered verbatim, no age suffix", () => {
+  const row = {
+    host: "h1",
+    release_id: 1,
+    ok: true,
+    seen_at: "garbage",
+  };
+  const { status, cells } = fleetRowCells(row, 1, NOW);
+  assert.equal(status, "dark");
+  assert.equal(cells[3], "garbage");
+});
+
+test("fleetRowCells: status in cells[1] equals the returned status", () => {
+  const row = { host: "h", seen_at: freshSeen, ok: true, release_id: 1 };
+  const { status, cells } = fleetRowCells(row, 1, NOW);
+  assert.equal(cells[1], status);
+});
+
+// ---------- fleetSummary ----------
+
+test("fleetSummary: empty array → \"\"", () => {
+  assert.equal(fleetSummary([], 0, NOW), "");
+  assert.equal(fleetSummary(null, 0, NOW), "");
+});
+
+test("fleetSummary: mixed statuses → correct counts in pinned format", () => {
+  const hosts = [
+    { host: "a", seen_at: freshSeen, ok: true, release_id: 1 }, // current
+    { host: "b", seen_at: freshSeen, ok: false, release_id: 1 }, // stale
+    { host: "c", seen_at: "2026-08-07T08:00:00Z", ok: true, release_id: 1 }, // dark (older than 5 min)
+    { host: "d", release_id: 0, ok: true }, // dark, no seen_at
+  ];
+  const summary = fleetSummary(hosts, 1, NOW);
+  assert.equal(summary, "4 host(s) — 1 current, 1 stale, 2 dark · latest release 1");
+});
+
+test("fleetSummary: latestReleaseID 0 → \"latest release (none)\"", () => {
+  const hosts = [{ host: "a", seen_at: freshSeen, ok: true, release_id: 0 }];
+  const summary = fleetSummary(hosts, 0, NOW);
+  assert.equal(summary, "1 host(s) — 1 current, 0 stale, 0 dark · latest release (none)");
+});
+
+// ---------- parseFleetResponse ----------
+
+test("parseFleetResponse: valid response round-trips, nowMs === Date.parse(now)", () => {
+  const json = {
+    hosts: [
+      { host: "h1", release_id: 1, ok: true, seen_at: "2026-08-07T11:59:00Z" },
+    ],
+    latest_release_id: 1,
+    now: "2026-08-07T12:00:00Z",
+  };
+  const out = parseFleetResponse(json);
+  assert.notEqual(out, null);
+  assert.equal(out.hosts, json.hosts); // passed through unchanged
+  assert.equal(out.latestReleaseID, 1);
+  assert.equal(out.nowMs, Date.parse("2026-08-07T12:00:00Z"));
+});
+
+test("parseFleetResponse: null json → null", () => {
+  assert.equal(parseFleetResponse(null), null);
+});
+
+test("parseFleetResponse: hosts not an array → null", () => {
+  assert.equal(parseFleetResponse({ hosts: "nope", latest_release_id: 0, now: "2026-08-07T12:00:00Z" }), null);
+});
+
+test("parseFleetResponse: hosts: [null] → null", () => {
+  assert.equal(parseFleetResponse({ hosts: [null], latest_release_id: 0, now: "2026-08-07T12:00:00Z" }), null);
+});
+
+test("parseFleetResponse: row missing host or empty-string host → null", () => {
+  assert.equal(parseFleetResponse({
+    hosts: [{ release_id: 0, ok: true }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  }), null);
+  assert.equal(parseFleetResponse({
+    hosts: [{ host: "", release_id: 0, ok: true }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  }), null);
+});
+
+test("parseFleetResponse: row non-boolean ok → null", () => {
+  assert.equal(parseFleetResponse({
+    hosts: [{ host: "h", release_id: 0, ok: "yes" }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  }), null);
+});
+
+test("parseFleetResponse: row release_id non-number / fractional / negative → null", () => {
+  for (const bad of ["1", 1.5, -1]) {
+    assert.equal(parseFleetResponse({
+      hosts: [{ host: "h", release_id: bad, ok: true }],
+      latest_release_id: 0,
+      now: "2026-08-07T12:00:00Z",
+    }), null, `release_id=${bad}`);
+  }
+});
+
+test("parseFleetResponse: optional field explicitly undefined is accepted (same as absent)", () => {
+  // The contract says optional fields are "absent (undefined) or a
+  // string" — a property present but set to undefined must validate,
+  // so the check is on the VALUE, not key presence.
+  const out = parseFleetResponse({
+    hosts: [{ host: "h", release_id: 0, ok: true, seen_at: undefined, error: undefined }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  });
+  assert.notEqual(out, null);
+  assert.equal(out.hosts[0].host, "h");
+});
+
+test("parseFleetResponse: row non-string optional field → null", () => {
+  assert.equal(parseFleetResponse({
+    hosts: [{ host: "h", release_id: 0, ok: true, seen_at: 123 }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  }), null);
+  assert.equal(parseFleetResponse({
+    hosts: [{ host: "h", release_id: 0, ok: true, error: 123 }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  }), null);
+  assert.equal(parseFleetResponse({
+    hosts: [{ host: "h", release_id: 0, ok: true, resync_requested_at: [1] }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  }), null);
+  assert.equal(parseFleetResponse({
+    hosts: [{ host: "h", release_id: 0, ok: true, token_created_at: { x: 1 } }],
+    latest_release_id: 0,
+    now: "2026-08-07T12:00:00Z",
+  }), null);
+});
+
+test("parseFleetResponse: negative or non-integer latest_release_id → null", () => {
+  assert.equal(parseFleetResponse({ hosts: [], latest_release_id: -1, now: "2026-08-07T12:00:00Z" }), null);
+  assert.equal(parseFleetResponse({ hosts: [], latest_release_id: 1.5, now: "2026-08-07T12:00:00Z" }), null);
+  assert.equal(parseFleetResponse({ hosts: [], latest_release_id: "1", now: "2026-08-07T12:00:00Z" }), null);
+  assert.equal(parseFleetResponse({ hosts: [], latest_release_id: null, now: "2026-08-07T12:00:00Z" }), null);
+});
+
+test("parseFleetResponse: missing or unparseable now → null", () => {
+  assert.equal(parseFleetResponse({ hosts: [], latest_release_id: 0 }), null);
+  // Unparseable.
+  assert.equal(parseFleetResponse({
+    hosts: [], latest_release_id: 0, now: "garbage",
+  }), null);
+  // Date-only (no time component) is not an RFC3339 timestamp.
+  assert.equal(parseFleetResponse({
+    hosts: [], latest_release_id: 0, now: "2026-08-07",
+  }), null);
+});
+
+test("parseFleetResponse: parseable now WITHOUT trailing Z → null", () => {
+  // The trailing-Z check pins the RFC3339 UTC wire shape (a date-
+  // only or offset timestamp is rejected, not silently reinterpreted).
+  assert.equal(parseFleetResponse({
+    hosts: [], latest_release_id: 0, now: "2026-08-07T12:00:00+00:00",
+  }), null);
+  // Hour-minute offset without Z.
+  assert.equal(parseFleetResponse({
+    hosts: [], latest_release_id: 0, now: "2026-08-07T12:00:00-05:00",
+  }), null);
 });

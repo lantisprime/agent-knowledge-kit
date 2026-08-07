@@ -1891,3 +1891,186 @@ func TestListConflicts(t *testing.T) {
 		t.Fatalf("claim/policy row: expected nil Attempted, got %+v", got.Attempted)
 	}
 }
+
+// --- fleet read model (build-order step 6) -----------------------------
+
+// TestListHostsEmpty — empty store returns a non-nil empty slice so the
+// wire form is "[]", never "null".
+func TestListHostsEmpty(t *testing.T) {
+	s := open(t)
+	got, err := s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("empty store: want non-nil empty slice, got nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty store: len=%d, want 0", len(got))
+	}
+}
+
+// TestListHostsUnion — union across heartbeats, resync_requests, and
+// host_tokens: a host visible only in one table still appears, with
+// the other-table fields zero/empty. Order is by host name.
+func TestListHostsUnion(t *testing.T) {
+	s := open(t)
+	// h1: heartbeat-only (ok=true, no error).
+	if err := s.Heartbeat("h1", 7, true, "", false); err != nil {
+		t.Fatal(err)
+	}
+	// h2: token-only (no heartbeat, no resync).
+	if _, err := s.IssueHostToken("h2"); err != nil {
+		t.Fatal(err)
+	}
+	// h3: resync-only (no heartbeat, no token).
+	if err := s.RequestResync("h3"); err != nil {
+		t.Fatal(err)
+	}
+	// h4: all three.
+	if err := s.Heartbeat("h4", 1, false, "boom", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RequestResync("h4"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.IssueHostToken("h4"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("want 4 rows, got %d: %#v", len(got), got)
+	}
+	// ORDER BY host.
+	want := []string{"h1", "h2", "h3", "h4"}
+	for i, h := range want {
+		if got[i].Host != h {
+			t.Fatalf("got[%d].Host = %q, want %q", i, got[i].Host, h)
+		}
+	}
+	// h1: heartbeat-only.
+	if got[0].ReleaseID != 7 || !got[0].OK || got[0].Error != "" || got[0].SeenAt == "" {
+		t.Fatalf("h1 heartbeat fields: %#v", got[0])
+	}
+	if got[0].ResyncRequestedAt != "" || got[0].TokenCreatedAt != "" {
+		t.Fatalf("h1 token/resync must be empty: %#v", got[0])
+	}
+	// h2: token-only. SeenAt == "" → never heartbeated; release_id,
+	// ok, error are zero/meaningless.
+	if got[1].SeenAt != "" || got[1].ReleaseID != 0 || got[1].OK || got[1].Error != "" {
+		t.Fatalf("h2 token-only heartbeat fields must be zero: %#v", got[1])
+	}
+	if got[1].ResyncRequestedAt != "" || got[1].TokenCreatedAt == "" {
+		t.Fatalf("h2 token row must carry token_created_at: %#v", got[1])
+	}
+	// h3: resync-only.
+	if got[2].SeenAt != "" || got[2].ReleaseID != 0 || got[2].OK || got[2].Error != "" {
+		t.Fatalf("h3 resync-only heartbeat fields must be zero: %#v", got[2])
+	}
+	if got[2].ResyncRequestedAt == "" || got[2].TokenCreatedAt != "" {
+		t.Fatalf("h3 resync row must carry resync_requested_at: %#v", got[2])
+	}
+	// h4: all three.
+	if got[3].ReleaseID != 1 || got[3].OK || got[3].Error != "boom" || got[3].SeenAt == "" {
+		t.Fatalf("h4 heartbeat fields: %#v", got[3])
+	}
+	if got[3].ResyncRequestedAt == "" || got[3].TokenCreatedAt == "" {
+		t.Fatalf("h4 must carry both resync and token: %#v", got[3])
+	}
+}
+
+// TestListHostsHeartbeatUpsert — a second Heartbeat for the same host
+// refreshes the row; ListHosts reflects the latest values, still one row.
+func TestListHostsHeartbeatUpsert(t *testing.T) {
+	s := open(t)
+	if err := s.Heartbeat("h1", 1, true, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Heartbeat("h1", 2, false, "down", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 row, got %d", len(got))
+	}
+	if got[0].Host != "h1" || got[0].ReleaseID != 2 || got[0].OK || got[0].Error != "down" {
+		t.Fatalf("upsert not reflected: %#v", got[0])
+	}
+}
+
+// TestListHostsResyncLifecycle — RequestResync sets ResyncRequestedAt;
+// only the Heartbeat(ok=true, resyncApplied=true) clear path empties
+// it. Heartbeat(ok=false, resyncApplied=true) and Heartbeat(ok=true,
+// resyncApplied=false) do NOT clear. Asserted via ListHosts alongside
+// the existing ResyncPending tests.
+func TestListHostsResyncLifecycle(t *testing.T) {
+	s := open(t)
+	if err := s.RequestResync("h1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ResyncRequestedAt == "" {
+		t.Fatalf("after RequestResync: want non-empty resync_requested_at, got %#v", got[0])
+	}
+	// ok=true && resyncApplied=true → cleared.
+	if err := s.Heartbeat("h1", 1, true, "", true); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ResyncRequestedAt != "" {
+		t.Fatalf("after cleared heartbeat: resync_requested_at must be empty, got %#v", got[0])
+	}
+	// Re-request; ok=true, resyncApplied=false → still pending.
+	if err := s.RequestResync("h1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Heartbeat("h1", 1, true, "", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].ResyncRequestedAt == "" {
+		t.Fatalf("resyncApplied=false must not clear: %#v", got[0])
+	}
+	// ok=false, resyncApplied=true → still pending.
+	if err := s.Heartbeat("h1", 1, false, "boom", true); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].ResyncRequestedAt == "" {
+		t.Fatalf("ok=false must not clear: %#v", got[0])
+	}
+}
+
+// TestListHostsErrorText — error text round-trips into the row.
+func TestListHostsErrorText(t *testing.T) {
+	s := open(t)
+	if err := s.Heartbeat("h1", 1, false, "hash mismatch on kernel/docs@abc", false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Error != "hash mismatch on kernel/docs@abc" {
+		t.Fatalf("error text round-trip: %#v", got[0])
+	}
+}
