@@ -374,3 +374,109 @@ func TestUIConflictBannersAndButtons(t *testing.T) {
 		t.Fatalf("style.css missing .error:empty rule")
 	}
 }
+
+// TestUIFleetSurface — the step-6 UI additions: nav-fleet button in
+// the topbar; view-fleet section is present; fleet-table thead
+// columns are in the pinned order (host, status, release, last seen,
+// error, resync pending since, token issued, actions); fleet-refresh
+// and fleet-empty exist; fleet-error has no `hidden` attribute (the
+// :empty CSS rule handles visibility); style.css carries the three
+// status colors.
+func TestUIFleetSurface(t *testing.T) {
+	ts := newUIOnlyFixture(t)
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	idxBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := string(idxBody)
+
+	// nav-fleet, view-fleet, fleet-refresh, fleet-empty must exist.
+	for _, id := range []string{"nav-fleet", "view-fleet", "fleet-refresh", "fleet-empty"} {
+		if !strings.Contains(idx, "id=\""+id+"\"") {
+			t.Fatalf("missing #%s in index.html", id)
+		}
+	}
+
+	// fleet-error carries no `hidden` attribute — visibility follows
+	// the .error:empty CSS rule.
+	open := "<p id=\"fleet-error\" class=\"error\""
+	idx2 := strings.Index(idx, open)
+	if idx2 < 0 {
+		t.Fatalf("missing fleet-error banner open tag")
+	}
+	end := strings.Index(idx[idx2:], ">")
+	if end < 0 {
+		t.Fatalf("malformed fleet-error tag")
+	}
+	tag := idx[idx2 : idx2+end+1]
+	if strings.Contains(tag, "hidden") {
+		t.Fatalf("fleet-error must not carry hidden: %q", tag)
+	}
+
+	// The fleet-table thead must contain exactly the 8 column headers
+	// in the pinned order.
+	wantHeaders := []string{
+		"host", "status", "release", "last seen",
+		"error", "resync pending since", "token issued", "actions",
+	}
+	tableStart := strings.Index(idx, "<table id=\"fleet-table\"")
+	if tableStart < 0 {
+		t.Fatalf("missing fleet-table")
+	}
+	theadStart := strings.Index(idx[tableStart:], "<thead>")
+	if theadStart < 0 {
+		t.Fatalf("missing fleet-table thead")
+	}
+	theadEnd := strings.Index(idx[tableStart+theadStart:], "</thead>")
+	if theadEnd < 0 {
+		t.Fatalf("missing fleet-table thead close")
+	}
+	thead := idx[tableStart+theadStart : tableStart+theadStart+theadEnd+len("</thead>")]
+	for _, h := range wantHeaders {
+		if !strings.Contains(thead, "<th>"+h+"</th>") {
+			t.Fatalf("fleet-table thead missing %q: %s", h, thead)
+		}
+	}
+	// And the order: each <th> appears in the slice order.
+	prev := -1
+	for _, h := range wantHeaders {
+		pos := strings.Index(thead, "<th>"+h+"</th>")
+		if pos <= prev {
+			t.Fatalf("fleet-table thead out of order around %q: %s", h, thead)
+		}
+		prev = pos
+	}
+	// No extra <th> tags in the thead — count "<th" (which also
+	// matches an attributed `<th class="…">`) and subtract the
+	// "<thead" matches, so a header cell smuggled in with attributes
+	// still fails the count.
+	if got, want := strings.Count(thead, "<th")-strings.Count(thead, "<thead"), len(wantHeaders); got != want {
+		t.Fatalf("fleet-table thead has %d th tags, want %d", got, want)
+	}
+
+	// style.css carries the three status colors.
+	resp, err = http.Get(ts.URL + "/ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	cssBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	css := string(cssBody)
+	for _, rule := range []string{".status-current", ".status-stale", ".status-dark"} {
+		if !strings.Contains(css, rule) {
+			t.Fatalf("style.css missing %s rule", rule)
+		}
+	}
+}

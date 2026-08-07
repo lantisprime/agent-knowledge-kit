@@ -3,10 +3,10 @@
 Status: accepted direction (operator decision, 2026-08-04). This plan
 supersedes the git-transport delivery model and the separate-identity
 delivery trust boundary (`delivery-trust-boundary.md`). Implementation
-has landed for build-order steps 1–5 (store + schema + release cut;
+has landed for build-order steps 1–6 (store + schema + release cut;
 thin subscriber with token-bound identity; authN; embedded curation
-UI; conflict records + merge view); the git transport is not yet
-retired — cutover is step 7.
+UI; conflict records + merge view; fleet page + force-resync UI);
+the git transport is not yet retired — cutover is step 7.
 
 ## Operator constraints (fixed)
 
@@ -145,7 +145,7 @@ conflicted, both versions, who resolved it, the winning version, when.
   error}`. Heartbeats are observability only — a last-seen row per
   host, never delivery or routing state.
 - Fleet page: which hosts are current, stale, or dark; per-host error
-  detail; a force-resync action.
+  detail; a force-resync action. **Shipped (step 6).**
 - **Force-resync (belief-erasure pull-flag).** Force-resync keeps the
   thin-client boundary: all intent is server-side in a dedicated
   `resync_requests(host, requested_at)` table, set by `POST
@@ -272,6 +272,18 @@ conflict record (stale-base save, lint-failed cut).
   completion cannot alter state or leak anything newer than the
   already-authorized release. Response: `204`, or `404 {"error":
   "not_found", ...}` when no token was issued.
+- `GET /api/hosts` — operator-only fleet read. One row per known host
+  (union of heartbeats, pending resyncs, and issued tokens), ordered
+  by host name. Response: `{"hosts": [{"host", "release_id", "ok",
+  "error"?, "seen_at"?, "resync_requested_at"?, "token_created_at"?}],
+  "latest_release_id", "now"}`. `seen_at` absent means the host has
+  never heartbeated; `release_id`/`ok`/`error` are zero/meaningless
+  in that case (consumers must check `seen_at` first).
+  `latest_release_id` is `0` when no release has been cut yet (a
+  normal state, not an error). `now` is the server clock, stamped by
+  the handler at response time, so clients compute heartbeat age
+  against the same clock that stamped `seen_at` without trusting
+  their own clock.
 - `GET /api/conflicts[?status=open|resolved]` — operator-only
   list of conflict records, newest first. Empty/absent `status`
   returns all. The list view carries no `attempted` payload (call
@@ -406,7 +418,13 @@ know the server exists.
    merge view with body diff, metadata diff, atomic save-and-resolve
    behind an attempts precondition; conflict endpoints
    operator-only).
-6. Fleet page + force resync.
+6. Fleet page + force resync. **Done** (GET /api/hosts fleet read —
+   union of heartbeats, pending resyncs, and issued tokens, with
+   latest_release_id and a server-clock `now` for age math;
+   operator-only; fleet UI page with current/stale/dark
+   classification — dark after 5 min without a heartbeat — per-host
+   error detail, pending-resync visibility, and a per-row force-resync
+   action).
 7. Cutover: adapters read the subscriber-materialized corpus (no
    adapter change expected); retire the git transport; update
    `architecture.md`, `REPO_MAP.md`, README.
@@ -436,9 +454,12 @@ callers.
   triggers a redundant re-apply of authentic, hash-verified content —
   availability noise, never an integrity break.
 - Forged resync ack: a spoofed `resync_applied` heartbeat can make a
-  resync appear done when it was withheld; the fleet page shows
-  `requested_at` vs the ack time so the anomaly is at least visible.
-  The completion signal is trustworthy only post-authN.
+  resync appear done when it was withheld; the fleet page shows a
+  pending request's `requested_at` only while it is pending; an ack
+  (legitimate or forged) deletes the request row, and v1 keeps no
+  durable resync request/ack audit trail, so a forged completion is
+  not retrospectively detectable in v1. Ack tagging/audit stays out
+  of scope for v1.
 - Stale-ack clear: because set and clear are serialized but untagged,
   an in-flight `ok && resync_applied` heartbeat acking a *previous*
   request can clear a just-set flag. The apply is idempotent (the host

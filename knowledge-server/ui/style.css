@@ -121,3 +121,11 @@ ul#publish-diff li { padding: 0.2rem 0; }
    a tinted background to match the diff del-bg color. Reuses the
    existing --diff-del-bg variable so the change is one rule. */
 #conflict-meta-diff tr.changed td { background: var(--diff-del-bg); }
+
+/* Step-6 fleet status colors. Reuses the existing palette variables. */
+.status-current { color: var(--accent); }
+.status-stale   { color: var(--error); }
+.status-dark    { color: var(--muted); }
+/* Fleet rows are not clickable (no detail view) — override the
+   global tbody cursor. */
+#fleet-table tbody tr { cursor: default; }

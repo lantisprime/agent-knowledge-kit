@@ -13,6 +13,7 @@
       <button id="nav-browse" type="button">Browse</button>
       <button id="nav-publish" type="button">Publish</button>
       <button id="nav-conflicts" type="button">Conflicts</button>
+      <button id="nav-fleet" type="button">Fleet</button>
       <span class="spacer"></span>
       <span id="who" class="who"></span>
       <button id="logout" type="button" hidden>Logout</button>
@@ -247,6 +248,26 @@
         <span id="conflict-state" class="muted"></span>
       </div>
       <p id="conflict-error" class="error"></p>
+    </section>
+
+    <section id="view-fleet" class="view" hidden>
+      <h2>Fleet</h2>
+      <div class="row">
+        <button id="fleet-refresh" type="button">Refresh</button>
+        <span id="fleet-summary" class="muted"></span>
+      </div>
+      <table id="fleet-table">
+        <thead>
+          <tr>
+            <th>host</th><th>status</th><th>release</th><th>last seen</th>
+            <th>error</th><th>resync pending since</th><th>token issued</th>
+            <th>actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="fleet-empty" class="muted" hidden>No hosts yet.</p>
+      <p id="fleet-error" class="error"></p>
     </section>
 
     <section id="view-error" class="view" hidden>

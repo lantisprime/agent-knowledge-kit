@@ -4,17 +4,25 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-knowledge-kit/knowledge-server/store"
 )
+
+// HostStatus is the local alias for store.HostStatus used by the
+// fleet API tests.
+type HostStatus = store.HostStatus
 
 // TestListDocs — GET /api/docs returns {"docs": [...]} and the
 // empty-store form is the literal `{"docs":[]}\n` (json.Encoder
@@ -898,4 +906,337 @@ func TestPostFlagConflict(t *testing.T) {
 			t.Fatalf("status=%d body=%s", r.StatusCode, body)
 		}
 	})
+}
+
+// --- fleet API tests (build-order step 6) -----------------------------
+
+// TestListHostsAuthMatrix — GET /api/hosts is operator-only on an
+// auth-enabled server: missing token → 401, host token → 403,
+// operator token → 200.
+func TestListHostsAuthMatrix(t *testing.T) {
+	f := newAuthedFixture(t)
+	hostTok := f.issueToken(t, "h1")
+	// No token → 401.
+	r, _ := f.do(t, http.MethodGet, "/api/hosts", "", nil)
+	if r.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no token: status=%d, want 401", r.StatusCode)
+	}
+	if got := r.Header.Get("WWW-Authenticate"); !strings.Contains(got, "Bearer") {
+		t.Fatalf("no token: WWW-Authenticate=%q, want Bearer challenge", got)
+	}
+	// Host token → 403.
+	r, _ = f.do(t, http.MethodGet, "/api/hosts", hostTok, nil)
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("host token: status=%d, want 403", r.StatusCode)
+	}
+	// Operator token → 200.
+	r, _ = f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("operator: status=%d, want 200", r.StatusCode)
+	}
+}
+
+// TestListHostsResponseShape — empty store wire form is
+// `{"hosts":[]}` (literal), latest_release_id is 0 with no release and
+// the release id after a cut, and now parses as RFC3339, ends in "Z",
+// and lies between a lower bound of time.Now().UTC().Truncate(time.Second)
+// captured just before the request and an upper bound of
+// time.Now().UTC() captured just after.
+func TestListHostsResponseShape(t *testing.T) {
+	// Pin a non-UTC local zone for the duration of this test: the
+	// handler must call .UTC() explicitly when stamping `now`, and on
+	// a machine whose local zone IS UTC a handler that dropped .UTC()
+	// would still emit a trailing "Z" and pass. With time.Local
+	// pinned to -05:00 that mutation emits "-05:00" and fails the
+	// suffix assertions below. No test in this package runs in
+	// parallel, so swapping the process-global is safe.
+	origLocal := time.Local
+	time.Local = time.FixedZone("UTC-5", -5*3600)
+	defer func() { time.Local = origLocal }()
+
+	// Empty-store assertions need a fixture WITHOUT a seeded release,
+	// otherwise latest_release_id is the seeded id, not 0.
+	f := newAuthedFixtureWith(t, "operator-secret-token-bbbbbbbbbbbbbbbbb", false)
+	// Empty store.
+	r, body := f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("empty: status=%d body=%s", r.StatusCode, body)
+	}
+	wantEmpty := `{"hosts":[],"latest_release_id":0,"now":"` + time.Now().UTC().Format(time.RFC3339) + `"}` + "\n"
+	if !strings.HasPrefix(string(body), `{"hosts":[],"latest_release_id":0,"now":"`) {
+		t.Fatalf("empty prefix: %s", body)
+	}
+	if !strings.HasSuffix(string(body), `Z"}`+"\n") {
+		t.Fatalf("empty suffix: %s", body)
+	}
+	_ = wantEmpty // shape is asserted structurally below
+
+	var got struct {
+		Hosts           []HostStatus `json:"hosts"`
+		LatestReleaseID int64        `json:"latest_release_id"`
+		Now             string       `json:"now"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode empty: %v body=%s", err, body)
+	}
+	if got.Hosts == nil || len(got.Hosts) != 0 {
+		t.Fatalf("empty hosts: %v", got.Hosts)
+	}
+	if got.LatestReleaseID != 0 {
+		t.Fatalf("empty latest_release_id: %d", got.LatestReleaseID)
+	}
+	if !strings.HasSuffix(got.Now, "Z") {
+		t.Fatalf("now must end in Z: %q", got.Now)
+	}
+	if _, err := time.Parse(time.RFC3339, got.Now); err != nil {
+		t.Fatalf("now parse: %v", err)
+	}
+
+	// After a cut, latest_release_id is the new id and now is bounded.
+	if _, err := f.s.SaveDoc("kernel", "kernel", store.DocSave{Status: "active", Body: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	cut, err := f.s.CutRelease("", "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lo := time.Now().UTC().Truncate(time.Second)
+	r, body = f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	hi := time.Now().UTC()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("post-cut: status=%d body=%s", r.StatusCode, body)
+	}
+	var got2 struct {
+		Hosts           []HostStatus `json:"hosts"`
+		LatestReleaseID int64        `json:"latest_release_id"`
+		Now             string       `json:"now"`
+	}
+	if err := json.Unmarshal(body, &got2); err != nil {
+		t.Fatalf("decode post-cut: %v", err)
+	}
+	if got2.LatestReleaseID != cut.ReleaseID {
+		t.Fatalf("latest_release_id: %d, want %d", got2.LatestReleaseID, cut.ReleaseID)
+	}
+	if !strings.HasSuffix(got2.Now, "Z") {
+		t.Fatalf("now must end in Z: %q", got2.Now)
+	}
+	parsed, err := time.Parse(time.RFC3339, got2.Now)
+	if err != nil {
+		t.Fatalf("now parse: %v", err)
+	}
+	if parsed.Before(lo) || parsed.After(hi) {
+		t.Fatalf("now = %v, want in [%v, %v]", parsed, lo, hi)
+	}
+}
+
+// TestListHostsCurrentReleaseInternalError — a CurrentRelease failure
+// that is NOT ErrNotFound must propagate as 500 internal, never be
+// swallowed into latest_release_id:0. The releases table is dropped
+// through a second raw connection (the store package's blank import
+// registers the "sqlite" driver process-wide); the host tables stay
+// intact, so ListHosts itself succeeds and a failure here is
+// attributable to the CurrentRelease branch alone.
+func TestListHostsCurrentReleaseInternalError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "fleet.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.Heartbeat("h1", 1, true, "", false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP TABLE releases`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	raw.Close()
+	ts := httptest.NewServer(newMux(s, nil)) // auth off: operator principal
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/api/hosts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s, want 500", resp.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte(`"error":"internal"`)) {
+		t.Fatalf("body=%s, want error:internal envelope", body)
+	}
+}
+
+// TestListHostsResyncOverHTTP — POST /api/hosts/{h}/resync visible in
+// GET /api/hosts as non-empty resync_requested_at; POST
+// /api/heartbeats with {ok:true, resync_applied:true} clears it.
+func TestListHostsResyncOverHTTP(t *testing.T) {
+	f := newAuthedFixture(t)
+	hostTok := f.issueToken(t, "h1")
+
+	// Issue resync via the operator route.
+	r, _ := f.do(t, http.MethodPost, "/api/hosts/h1/resync", f.opsToken(), nil)
+	if r.StatusCode != http.StatusNoContent {
+		t.Fatalf("resync: status=%d", r.StatusCode)
+	}
+
+	// GET /api/hosts (operator) shows the host with resync_requested_at.
+	r, body := f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("get: status=%d body=%s", r.StatusCode, body)
+	}
+	// Use a fresh decode target per call: Go's json.Unmarshal does
+	// NOT reset fields that are absent from the new JSON, so
+	// re-using one target across two calls would carry stale values
+	// forward (in particular, an absent resync_requested_at would
+	// keep the previous non-empty value).
+	var got1 struct {
+		Hosts []HostStatus `json:"hosts"`
+	}
+	if err := json.Unmarshal(body, &got1); err != nil {
+		t.Fatal(err)
+	}
+	if len(got1.Hosts) != 1 || got1.Hosts[0].Host != "h1" || got1.Hosts[0].ResyncRequestedAt == "" {
+		t.Fatalf("resync visibility: %#v", got1.Hosts)
+	}
+
+	// Heartbeat with ok=true + resync_applied=true via the host
+	// token clears the field.
+	r, _ = f.do(t, http.MethodPost, "/api/heartbeats", hostTok, map[string]any{
+		"host": "h1", "release_id": 0, "ok": true, "resync_applied": true,
+	})
+	if r.StatusCode != http.StatusNoContent {
+		t.Fatalf("heartbeat: status=%d", r.StatusCode)
+	}
+	r, body = f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	var got2 struct {
+		Hosts []HostStatus `json:"hosts"`
+	}
+	if err := json.Unmarshal(body, &got2); err != nil {
+		t.Fatal(err)
+	}
+	if len(got2.Hosts) != 1 || got2.Hosts[0].ResyncRequestedAt != "" {
+		t.Fatalf("post-clear: %#v", got2.Hosts)
+	}
+}
+
+// TestListHostsBearerRowAppears — a heartbeat from a host-token
+// subscriber shows up in GET /api/hosts with the token's bound host.
+func TestListHostsBearerRowAppears(t *testing.T) {
+	f := newAuthedFixture(t)
+	hostTok := f.issueToken(t, "h1")
+	r, _ := f.do(t, http.MethodPost, "/api/heartbeats", hostTok, map[string]any{
+		"host": "h1", "release_id": 0, "ok": true,
+	})
+	if r.StatusCode != http.StatusNoContent {
+		t.Fatalf("heartbeat: status=%d", r.StatusCode)
+	}
+	r, body := f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("get: status=%d body=%s", r.StatusCode, body)
+	}
+	var got struct {
+		Hosts []HostStatus `json:"hosts"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Hosts) != 1 || got.Hosts[0].Host != "h1" || got.Hosts[0].SeenAt == "" {
+		t.Fatalf("bearer heartbeat visibility: %#v", got.Hosts)
+	}
+}
+
+// TestListHostsHardeningHeaders — writeJSON applies Cache-Control:
+// no-store and X-Content-Type-Options: nosniff on GET /api/hosts.
+func TestListHostsHardeningHeaders(t *testing.T) {
+	f := newAuthedFixture(t)
+	r, _ := f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	if r.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control=%q, want no-store", r.Header.Get("Cache-Control"))
+	}
+	if r.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("X-Content-Type-Options=%q, want nosniff", r.Header.Get("X-Content-Type-Options"))
+	}
+}
+
+// TestListHostsOmitemptyExactness — the raw JSON for a token-only
+// host CONTAINS "release_id":0 and "ok":false and does NOT contain
+// the keys "seen_at", "resync_requested_at" (no pending request), or
+// "error"; a heartbeated host's row contains "seen_at".
+func TestListHostsOmitemptyExactness(t *testing.T) {
+	f := newAuthedFixture(t)
+	// Token-only host (no heartbeat, no resync).
+	if _, err := f.s.IssueHostToken("tok-only"); err != nil {
+		t.Fatal(err)
+	}
+	// Heartbeated host.
+	if err := f.s.Heartbeat("hb", 1, true, "", false); err != nil {
+		t.Fatal(err)
+	}
+	r, body := f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", r.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte(`"host":"tok-only"`)) {
+		t.Fatalf("missing tok-only row: %s", body)
+	}
+	if !bytes.Contains(body, []byte(`"host":"hb"`)) {
+		t.Fatalf("missing hb row: %s", body)
+	}
+	// tok-only row carries release_id:0 and ok:false.
+	tokIdx := bytes.Index(body, []byte(`"host":"tok-only"`))
+	if tokIdx < 0 {
+		t.Fatalf("tok-only row missing: %s", body)
+	}
+	// Walk forward to the closing '}' of the tok-only object.
+	end := bytes.Index(body[tokIdx:], []byte(`}`))
+	if end < 0 {
+		t.Fatalf("malformed tok-only row: %s", body)
+	}
+	tokObj := body[tokIdx : tokIdx+end+1]
+	if !bytes.Contains(tokObj, []byte(`"release_id":0`)) {
+		t.Fatalf("tok-only row missing release_id:0: %s", tokObj)
+	}
+	if !bytes.Contains(tokObj, []byte(`"ok":false`)) {
+		t.Fatalf("tok-only row missing ok:false: %s", tokObj)
+	}
+	// Three absent fields on the token-only host: error (heartbeat
+	// never landed), seen_at (no heartbeat), resync_requested_at
+	// (no resync). All three must be omitted; the only optional
+	// field present is token_created_at.
+	for _, key := range []string{`"error"`, `"seen_at"`, `"resync_requested_at"`} {
+		if bytes.Contains(tokObj, []byte(key)) {
+			t.Fatalf("tok-only row must NOT contain %s: %s", key, tokObj)
+		}
+	}
+	// ... and token_created_at must be PRESENT here: it is the one
+	// optional field a token-only row carries, and a broken or
+	// missing omitempty tag on it would otherwise go undetected.
+	if !bytes.Contains(tokObj, []byte(`"token_created_at"`)) {
+		t.Fatalf("tok-only row missing token_created_at: %s", tokObj)
+	}
+	// hb row carries seen_at and, having no token, must NOT carry
+	// token_created_at.
+	hbIdx := bytes.Index(body, []byte(`"host":"hb"`))
+	if hbIdx < 0 {
+		t.Fatalf("hb row missing: %s", body)
+	}
+	end = bytes.Index(body[hbIdx:], []byte(`}`))
+	if end < 0 {
+		t.Fatalf("malformed hb row: %s", body)
+	}
+	hbObj := body[hbIdx : hbIdx+end+1]
+	if !bytes.Contains(hbObj, []byte(`"seen_at"`)) {
+		t.Fatalf("hb row missing seen_at: %s", hbObj)
+	}
+	if bytes.Contains(hbObj, []byte(`"token_created_at"`)) {
+		t.Fatalf("hb row must NOT contain token_created_at: %s", hbObj)
+	}
 }
