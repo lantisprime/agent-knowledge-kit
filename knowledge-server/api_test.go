@@ -938,40 +938,54 @@ func TestListHostsAuthMatrix(t *testing.T) {
 
 // TestListHostsResponseShape — empty store wire form is
 // `{"hosts":[]}` (literal), latest_release_id is 0 with no release and
-// the release id after a cut, and now parses as RFC3339, ends in "Z",
-// and lies between a lower bound of time.Now().UTC().Truncate(time.Second)
-// captured just before the request and an upper bound of
-// time.Now().UTC() captured just after.
+// the release id after a cut, and each response reads a non-UTC clock
+// value and renders the exact corresponding RFC3339 UTC timestamp.
 func TestListHostsResponseShape(t *testing.T) {
-	// Pin a non-UTC local zone for the duration of this test: the
-	// handler must call .UTC() explicitly when stamping `now`, and on
-	// a machine whose local zone IS UTC a handler that dropped .UTC()
-	// would still emit a trailing "Z" and pass. With time.Local
-	// pinned to -05:00 that mutation emits "-05:00" and fails the
-	// suffix assertions below. No test in this package runs in
-	// parallel, so swapping the process-global is safe.
-	origLocal := time.Local
-	time.Local = time.FixedZone("UTC-5", -5*3600)
-	// Register this before the fixture so LIFO cleanup closes the HTTP
-	// server before restoring the process-global timezone.
-	t.Cleanup(func() { time.Local = origLocal })
+	local := time.FixedZone("UTC-5", -5*3600)
+	fixedTimes := []time.Time{
+		time.Date(2026, time.August, 8, 9, 30, 0, 0, local),
+		time.Date(2026, time.August, 8, 10, 45, 0, 0, local),
+	}
+	clockCalls := 0
+	now := func() time.Time {
+		if clockCalls >= len(fixedTimes) {
+			t.Fatalf("clock called more than %d times", len(fixedTimes))
+		}
+		got := fixedTimes[clockCalls]
+		clockCalls++
+		return got
+	}
+	const wantEmptyNow = "2026-08-08T14:30:00Z"
+	const wantPostCutNow = "2026-08-08T15:45:00Z"
 
-	// Empty-store assertions need a fixture WITHOUT a seeded release,
-	// otherwise latest_release_id is the seeded id, not 0.
-	f := newAuthedFixtureWith(t, "operator-secret-token-bbbbbbbbbbbbbbbbb", false)
+	s, err := store.Open(filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	a := &api{st: s, now: now}
+	do := func() (*http.Response, []byte) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		a.listHosts(rr, httptest.NewRequest(http.MethodGet, "/api/hosts", nil))
+		resp := rr.Result()
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp, body
+	}
+
 	// Empty store.
-	r, body := f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
+	r, body := do()
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("empty: status=%d body=%s", r.StatusCode, body)
 	}
-	wantEmpty := `{"hosts":[],"latest_release_id":0,"now":"` + time.Now().UTC().Format(time.RFC3339) + `"}` + "\n"
-	if !strings.HasPrefix(string(body), `{"hosts":[],"latest_release_id":0,"now":"`) {
-		t.Fatalf("empty prefix: %s", body)
+	wantEmpty := `{"hosts":[],"latest_release_id":0,"now":"` + wantEmptyNow + `"}` + "\n"
+	if string(body) != wantEmpty {
+		t.Fatalf("empty body = %q, want %q", body, wantEmpty)
 	}
-	if !strings.HasSuffix(string(body), `Z"}`+"\n") {
-		t.Fatalf("empty suffix: %s", body)
-	}
-	_ = wantEmpty // shape is asserted structurally below
 
 	var got struct {
 		Hosts           []HostStatus `json:"hosts"`
@@ -987,24 +1001,23 @@ func TestListHostsResponseShape(t *testing.T) {
 	if got.LatestReleaseID != 0 {
 		t.Fatalf("empty latest_release_id: %d", got.LatestReleaseID)
 	}
-	if !strings.HasSuffix(got.Now, "Z") {
-		t.Fatalf("now must end in Z: %q", got.Now)
+	if got.Now != wantEmptyNow {
+		t.Fatalf("now = %q, want %q", got.Now, wantEmptyNow)
 	}
 	if _, err := time.Parse(time.RFC3339, got.Now); err != nil {
 		t.Fatalf("now parse: %v", err)
 	}
 
-	// After a cut, latest_release_id is the new id and now is bounded.
-	if _, err := f.s.SaveDoc("kernel", "kernel", store.DocSave{Status: "active", Body: "k"}); err != nil {
+	// After a cut, latest_release_id is the new id and now advances to
+	// the clock value read for this response.
+	if _, err := s.SaveDoc("kernel", "kernel", store.DocSave{Status: "active", Body: "k"}); err != nil {
 		t.Fatal(err)
 	}
-	cut, err := f.s.CutRelease("", "tester")
+	cut, err := s.CutRelease("", "tester")
 	if err != nil {
 		t.Fatal(err)
 	}
-	lo := time.Now().UTC().Truncate(time.Second)
-	r, body = f.do(t, http.MethodGet, "/api/hosts", f.opsToken(), nil)
-	hi := time.Now().UTC()
+	r, body = do()
 	if r.StatusCode != http.StatusOK {
 		t.Fatalf("post-cut: status=%d body=%s", r.StatusCode, body)
 	}
@@ -1019,15 +1032,14 @@ func TestListHostsResponseShape(t *testing.T) {
 	if got2.LatestReleaseID != cut.ReleaseID {
 		t.Fatalf("latest_release_id: %d, want %d", got2.LatestReleaseID, cut.ReleaseID)
 	}
-	if !strings.HasSuffix(got2.Now, "Z") {
-		t.Fatalf("now must end in Z: %q", got2.Now)
+	if got2.Now != wantPostCutNow {
+		t.Fatalf("now = %q, want %q", got2.Now, wantPostCutNow)
 	}
-	parsed, err := time.Parse(time.RFC3339, got2.Now)
-	if err != nil {
+	if _, err := time.Parse(time.RFC3339, got2.Now); err != nil {
 		t.Fatalf("now parse: %v", err)
 	}
-	if parsed.Before(lo) || parsed.After(hi) {
-		t.Fatalf("now = %v, want in [%v, %v]", parsed, lo, hi)
+	if clockCalls != 2 {
+		t.Fatalf("clock calls = %d, want 2", clockCalls)
 	}
 }
 
