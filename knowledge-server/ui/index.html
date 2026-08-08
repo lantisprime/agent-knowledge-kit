@@ -52,6 +52,34 @@
           <p class="view-lead">Browse active knowledge and immutable document history.</p>
         </div>
       </div>
+      <details id="document-model-help" class="help-panel" open>
+        <summary>How documents work</summary>
+        <div class="help-content">
+          <p>A document is one durable piece of knowledge. Its collection and family id form a stable identity; every save creates a new immutable version.</p>
+          <dl class="document-model">
+            <div>
+              <dt>Collection</dt>
+              <dd><code>kernel</code> is injected into every fresh agent session. <code>docs</code> is materialized for trigger-based loading.</dd>
+            </div>
+            <div>
+              <dt>Family id</dt>
+              <dd>A stable, path-safe name shared by every version of the same document, such as <code>incident-recovery</code>.</dd>
+            </div>
+            <div>
+              <dt>Version and status</dt>
+              <dd>Each save creates a numbered version. Drafts stay out of releases; the active version is eligible for the next release; replaced versions become superseded history.</dd>
+            </div>
+            <div>
+              <dt>Content and metadata</dt>
+              <dd>The title and Markdown body carry the knowledge. Tier, owner, audience, and triggers describe how operators and agents should use it.</dd>
+            </div>
+            <div>
+              <dt>Links</dt>
+              <dd>Version-specific <code>reference</code> and <code>supersedes</code> relationships connect exact document versions and are checked before release.</dd>
+            </div>
+          </dl>
+        </div>
+      </details>
       <div class="browse-bar">
         <button id="browse-new" type="button" class="primary">New document</button>
         <label>Collection
@@ -86,13 +114,15 @@
       <p class="eyebrow">Library</p>
       <h2>New doc</h2>
       <label>Collection
-        <select id="newdoc-collection">
+        <select id="newdoc-collection" aria-describedby="newdoc-collection-help">
           <option value="docs">docs</option>
           <option value="kernel">kernel</option>
         </select>
+        <span id="newdoc-collection-help" class="field-help"><code>kernel</code> is always injected; <code>docs</code> is materialized for trigger-based loaders.</span>
       </label>
       <label>Family id
-        <input id="newdoc-family" type="text" autocomplete="off" spellcheck="false">
+        <input id="newdoc-family" type="text" autocomplete="off" spellcheck="false" aria-describedby="newdoc-family-help">
+        <span id="newdoc-family-help" class="field-help">Stable path-safe name for this document across all versions, for example <code>incident-recovery</code>.</span>
       </label>
       <div class="row">
         <button id="newdoc-go" type="button" class="primary">Open editor</button>
@@ -106,51 +136,63 @@
       <h2>Editor</h2>
       <p id="editor-path" class="muted"></p>
       <div class="row">
-        <button id="editor-history" type="button">History</button>
-        <button id="editor-reload" type="button">Reload</button>
+        <button id="editor-history" type="button" disabled>History</button>
+        <button id="editor-reload" type="button" disabled>Reload</button>
       </div>
-      <label>Title <input id="ed-title" type="text" autocomplete="off" spellcheck="false"></label>
-      <div class="row">
-        <label>Status
-          <select id="ed-status">
-            <option value="draft">draft</option>
-            <option value="active">active</option>
-          </select>
+      <fieldset id="editor-fields" class="editor-fields" disabled>
+        <legend class="visually-hidden">Document fields</legend>
+        <label>Title <input id="ed-title" type="text" autocomplete="off" spellcheck="false"></label>
+        <div class="row">
+          <label>Status
+            <select id="ed-status" aria-describedby="ed-status-help">
+              <option value="draft">draft</option>
+              <option value="active">active</option>
+            </select>
+            <span id="ed-status-help" class="field-help">Drafts are excluded from releases. Active versions are release candidates.</span>
+          </label>
+          <label>Tier <input id="ed-tier" type="text" autocomplete="off" spellcheck="false" aria-describedby="ed-tier-help">
+            <span id="ed-tier-help" class="field-help">Descriptive metadata only; the collection controls actual delivery.</span>
+          </label>
+        </div>
+        <label>Owner <input id="ed-owner" type="text" autocomplete="off" spellcheck="false"></label>
+        <label>Audience <input id="ed-audience" type="text" autocomplete="off" spellcheck="false"></label>
+        <label>Triggers (comma-separated)
+          <input id="ed-triggers" type="text" autocomplete="off" spellcheck="false" aria-describedby="ed-triggers-help">
+          <span id="ed-triggers-help" class="field-help">Terms or situations that help a loader decide when this document is relevant.</span>
         </label>
-        <label>Tier <input id="ed-tier" type="text" autocomplete="off" spellcheck="false"></label>
-      </div>
-      <label>Owner <input id="ed-owner" type="text" autocomplete="off" spellcheck="false"></label>
-      <label>Audience <input id="ed-audience" type="text" autocomplete="off" spellcheck="false"></label>
-      <label>Triggers (comma-separated)
-        <input id="ed-triggers" type="text" autocomplete="off" spellcheck="false">
-      </label>
-      <label>Links (JSON array)
-        <textarea id="ed-links" rows="6" spellcheck="false" placeholder='[{"relation":"reference","collection":"docs","family_id":"runbook","version":1}]'></textarea>
-      </label>
-      <label>Body
-        <textarea id="ed-body" rows="20" spellcheck="false"></textarea>
-      </label>
-      <div id="kernel-counters" class="counters" hidden>
-        <span>words: <strong id="kernel-words">0</strong> / 2000</span>
-        <span>bytes: <strong id="kernel-bytes">0</strong> / 24576</span>
-        <span class="muted">(advisory \u2014 server enforces at release cut)</span>
-      </div>
-      <div class="row">
-        <button id="editor-save" type="button" class="primary">Save document</button>
-        <button id="editor-merge" type="button" hidden>Open merge view</button>
-        <span id="editor-save-state" class="muted"></span>
-      </div>
-      <p id="editor-error" class="error"></p>
+        <label>Links (JSON array)
+          <textarea id="ed-links" rows="6" spellcheck="false" aria-describedby="ed-links-help" placeholder='[{"relation":"reference","collection":"docs","family_id":"runbook","version":1}]'></textarea>
+          <span id="ed-links-help" class="field-help">Optional exact-version relationships. Use <code>reference</code> for an active release target or <code>supersedes</code> for a target already in superseded history.</span>
+        </label>
+        <label>Body
+          <textarea id="ed-body" rows="20" spellcheck="false" aria-describedby="ed-body-help"></textarea>
+          <span id="ed-body-help" class="field-help">The durable knowledge content, written as Markdown.</span>
+        </label>
+        <div id="kernel-counters" class="counters" hidden>
+          <span>words: <strong id="kernel-words">0</strong> / 2000</span>
+          <span>bytes: <strong id="kernel-bytes">0</strong> / 24576</span>
+          <span class="muted">(advisory \u2014 server enforces at release cut)</span>
+        </div>
+        <div class="row">
+          <button id="editor-save" type="button" class="primary">Save document</button>
+          <button id="editor-merge" type="button" hidden>Open merge view</button>
+          <span id="editor-save-state" class="muted" role="status" aria-live="polite"></span>
+        </div>
+      </fieldset>
+      <p id="editor-error" class="error" role="alert" aria-live="polite"></p>
     </section>
 
     <section id="view-history" class="view" hidden>
       <p class="eyebrow">Versions</p>
       <h2>History</h2>
       <p id="history-path" class="muted"></p>
+      <p id="history-error" class="error" role="alert" aria-live="polite"></p>
+      <div class="row">
+        <button id="history-back" type="button">Back to editor</button>
+      </div>
       <ul id="history-list"></ul>
       <div id="history-diff-controls" class="row" hidden>
         <button id="history-diff-go" type="button">Diff selected</button>
-        <button id="history-back" type="button">Back to editor</button>
       </div>
       <pre id="history-diff" class="diff" hidden></pre>
       <div id="history-fallback" class="diff-fallback" hidden></div>

@@ -122,6 +122,10 @@ best-effort heartbeat.
 
 ## Curation and lifecycle
 
+- The Documents view includes an inline guide to collections, family ids,
+  immutable versions, statuses, metadata, and exact-version links. Editor
+  controls remain disabled until the latest version has loaded, preventing a
+  slow response from overwriting operator input.
 - Every save creates an immutable version; one active version is allowed per
   collection/family.
 - Saves may carry ordered, version-specific `reference` and `supersedes`

@@ -103,6 +103,151 @@ func TestUIServesIndexWithExactCSP(t *testing.T) {
 	}
 }
 
+// TestUIDocumentGuidanceAndAsyncEditorGate pins the served HTML and JavaScript
+// source contract behind the browser-reviewed UX. It deliberately checks only
+// stable wiring markers; the manual browser checklist supplies runtime DOM and
+// accessibility evidence without adding a browser dependency to the Go suite.
+func TestUIDocumentGuidanceAndAsyncEditorGate(t *testing.T) {
+	ts := newUIOnlyFixture(t)
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := readAllBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("index status=%d, want 200", resp.StatusCode)
+	}
+	for _, want := range []string{
+		`id="document-model-help"`,
+		`<summary>How documents work</summary>`,
+		`id="newdoc-collection-help"`,
+		`id="newdoc-family-help"`,
+		`id="editor-history" type="button" disabled`,
+		`id="editor-reload" type="button" disabled`,
+		`id="editor-fields" class="editor-fields" disabled`,
+		`id="editor-save-state" class="muted" role="status" aria-live="polite"`,
+		`id="history-error" class="error" role="alert" aria-live="polite"`,
+	} {
+		if !strings.Contains(index, want) {
+			t.Errorf("index missing UX contract %q", want)
+		}
+	}
+	historyBack := strings.Index(index, `id="history-back"`)
+	historyHiddenControls := strings.Index(index, `id="history-diff-controls" class="row" hidden`)
+	if historyBack < 0 || historyHiddenControls < 0 || historyBack > historyHiddenControls {
+		t.Errorf("history Back must remain outside the initially hidden diff controls: back=%d controls=%d", historyBack, historyHiddenControls)
+	}
+
+	resp, err = http.Get(ts.URL + "/ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := readAllBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("app status=%d, want 200", resp.StatusCode)
+	}
+	editorStart := strings.Index(app, "async function openEditor(")
+	editorEnd := strings.Index(app, "function updateKernelCounters(")
+	if editorStart < 0 || editorEnd <= editorStart {
+		t.Fatalf("cannot isolate openEditor source: start=%d end=%d", editorStart, editorEnd)
+	}
+	editorSource := app[editorStart:editorEnd]
+	loadStart := strings.Index(editorSource, "setEditorLoading(true)")
+	loadFetch := strings.Index(editorSource, "await apiFetch(encodePath(collection, family)")
+	loadEnd := strings.Index(editorSource, "setEditorLoading(false)")
+	if loadStart < 0 || loadFetch < 0 || loadEnd < 0 || !(loadStart < loadFetch && loadFetch < loadEnd) {
+		t.Errorf("editor load gate ordering start=%d fetch=%d end=%d", loadStart, loadFetch, loadEnd)
+	}
+	if !strings.Contains(editorSource, "if (state.current !== current) return") {
+		t.Error("a superseded editor load must not overwrite the current editor")
+	}
+	if !strings.Contains(editorSource, "setEditorLoadFailed();") {
+		t.Error("a non-200/404 load must route to the failed-load gate")
+	}
+	// UX-2 failure path: any response other than 200/404 keeps editing
+	// disabled and enables Reload so the operator can retry.
+	failStart := strings.Index(app, "function setEditorLoadFailed(")
+	failEnd := strings.Index(app, "async function openEditor(")
+	if failStart < 0 || failEnd <= failStart {
+		t.Fatalf("cannot isolate setEditorLoadFailed source: start=%d end=%d", failStart, failEnd)
+	}
+	failSource := app[failStart:failEnd]
+	for _, want := range []string{
+		`byId("editor-fields").disabled = true;`,
+		`byId("editor-history").disabled = true;`,
+		`byId("editor-reload").disabled = false;`,
+	} {
+		if !strings.Contains(failSource, want) {
+			t.Errorf("load failure must leave editing disabled and enable Reload, missing %q", want)
+		}
+	}
+	saveStart := strings.Index(app, "async function submitEditorSave(")
+	saveEnd := strings.Index(app, "// ---------- history ----------")
+	if saveStart < 0 || saveEnd <= saveStart {
+		t.Fatalf("cannot isolate submitEditorSave source: start=%d end=%d", saveStart, saveEnd)
+	}
+	saveSource := app[saveStart:saveEnd]
+	for _, want := range []string{
+		`const current = state.current;`,
+		`if (current.saving) return;`,
+		`if (state.current !== current) return;`,
+	} {
+		if !strings.Contains(saveSource, want) {
+			t.Errorf("app missing editor-save safety contract %q", want)
+		}
+	}
+	historyStart := strings.Index(app, "async function enterHistoryView(")
+	historyEnd := strings.Index(app, "function renderHistoryList(")
+	if historyStart < 0 || historyEnd <= historyStart {
+		t.Fatalf("cannot isolate enterHistoryView source: start=%d end=%d", historyStart, historyEnd)
+	}
+	historySource := app[historyStart:historyEnd]
+	for _, want := range []string{
+		`if (!sameHistory) clearHistoryContext();`,
+		`const generation = ++state.historyGen;`,
+		`if (state.current !== current || state.historyGen !== generation) return;`,
+		`setText("history-error", "");`,
+		`setText("history-error", ` + "`" + `History failed: HTTP ${r.status} ${r.body || ""}` + "`" + `);`,
+	} {
+		if !strings.Contains(historySource, want) {
+			t.Errorf("app missing history safety contract %q", want)
+		}
+	}
+	viewStart := strings.Index(app, "async function viewHistoryVersion(")
+	viewEnd := strings.Index(app, "async function diffTwoVersions(")
+	if viewStart < 0 || viewEnd <= viewStart {
+		t.Fatalf("cannot isolate viewHistoryVersion source: start=%d end=%d", viewStart, viewEnd)
+	}
+	viewSource := app[viewStart:viewEnd]
+	if !strings.Contains(viewSource, `const generation = ++state.historyGen;`) ||
+		!strings.Contains(viewSource, `state.historyGen !== generation`) {
+		t.Error("version-view requests must ignore superseded same-document responses")
+	}
+	if !strings.Contains(viewSource, `setText("history-error", `+"`"+`View failed: HTTP ${r.status} ${r.body || ""}`+"`"+`);`) {
+		t.Error("version-view failure must use the durable history error region")
+	}
+	// UX-5/UX-6: diff responses must respect the monotonic history
+	// request generation and report failures in the durable error region.
+	diffStart := strings.Index(app, "async function diffTwoVersions(")
+	diffEnd := strings.Index(app, "// renderSideBySide populates")
+	if diffStart < 0 || diffEnd <= diffStart {
+		t.Fatalf("cannot isolate diffTwoVersions source: start=%d end=%d", diffStart, diffEnd)
+	}
+	diffSource := app[diffStart:diffEnd]
+	for _, want := range []string{
+		`const generation = ++state.historyGen;`,
+		`if (state.current !== current || state.historyGen !== generation) return;`,
+	} {
+		if !strings.Contains(diffSource, want) {
+			t.Errorf("diff responses must respect the history request generation, missing %q", want)
+		}
+	}
+	if !strings.Contains(diffSource, `setText("history-error", `+"`"+`Diff fetch failed: ${a.status}/${b.status}`+"`"+`);`) {
+		t.Error("diff failure must use the durable history error region")
+	}
+}
+
 func TestUIRootIsExactPath(t *testing.T) {
 	ts := newUIOnlyFixture(t)
 	// /foo must NOT fall through to index.html — registerUI uses
