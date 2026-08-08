@@ -35,10 +35,12 @@ const state = {
   docs: [],
   filter: { collection: "", status: "", tier: "" },
   // editor state
-  current: null,           // { collection, family, version, saveState, conflictId }
+  current: null,           // { collection, family, version, saveState, conflictId, loading, saving }
   // history view: list of DocMeta fetched on entry + the picked set
   historyVersions: [],
   historyPicked: new Set(),
+  historyDocument: null,    // { collection, family } for the rendered history context
+  historyGen: 0,            // latest history/list/view/diff request generation
   // publish state
   publishCurrent: null,
   publishCandidate: null,
@@ -314,28 +316,52 @@ async function submitNewDoc() {
 
 // ---------- editor ----------
 
+function clearEditorForm() {
+  byId("ed-title").value = "";
+  byId("ed-status").value = "draft";
+  byId("ed-tier").value = "";
+  byId("ed-owner").value = "";
+  byId("ed-audience").value = "";
+  byId("ed-triggers").value = "";
+  byId("ed-links").value = "";
+  byId("ed-body").value = "";
+}
+
+function setEditorLoading(loading) {
+  byId("editor-fields").disabled = loading;
+  byId("editor-history").disabled = loading;
+  byId("editor-reload").disabled = loading;
+  if (state.current) state.current.loading = loading;
+  if (loading) setText("editor-save-state", "Loading document…");
+}
+
+function setEditorLoadFailed() {
+  byId("editor-fields").disabled = true;
+  byId("editor-history").disabled = true;
+  byId("editor-reload").disabled = false;
+  if (state.current) state.current.loading = true;
+  setText("editor-save-state", "Load failed");
+}
+
 async function openEditor(collection, family, saveState) {
   showView("editor");
-  state.current = { collection, family, version: 0, saveState, conflictId: null };
+  const current = {
+    collection, family, version: 0, saveState, conflictId: null, loading: true, saving: false,
+  };
+  state.current = current;
   setText("editor-path", `${collection} / ${family}`);
-  setText("editor-save-state", "");
   setText("editor-error", "");
   byId("editor-merge").hidden = true;
+  clearEditorForm();
+  setEditorLoading(true);
   // Load latest version: omit ?version entirely so the API's "absent"
   // branch (which returns 404 for an unknown family) reaches the
   // new-doc branch here, and existing docs come back at max(version).
   const r = await apiFetch(encodePath(collection, family), { method: "GET" });
+  if (state.current !== current) return;
   if (r.authFailure) return;
   if (r.status === 404) {
     // New doc. Leave fields blank; first save carries no base_version.
-    byId("ed-title").value = "";
-    byId("ed-status").value = "draft";
-    byId("ed-tier").value = "";
-    byId("ed-owner").value = "";
-    byId("ed-audience").value = "";
-    byId("ed-triggers").value = "";
-    byId("ed-links").value = "";
-    byId("ed-body").value = "";
     state.current.saveState = { baseVersion: null, exists: false };
     state.current.version = 0;
     setText("editor-save-state", "new (untracked)");
@@ -354,6 +380,10 @@ async function openEditor(collection, family, saveState) {
     setText("editor-save-state", `v${d.version} (base ${d.version})`);
   } else {
     setText("editor-error", `Load failed: HTTP ${r.status} ${r.body || ""}`);
+    setEditorLoadFailed();
+  }
+  if (r.status === 404 || r.status === 200) {
+    setEditorLoading(false);
   }
   updateKernelCounters();
 }
@@ -372,8 +402,10 @@ function updateKernelCounters() {
 }
 
 async function submitEditorSave() {
-  if (!state.current) return;
-  const c = state.current.collection, f = state.current.family;
+  if (!state.current || state.current.loading) return;
+  const current = state.current;
+  if (current.saving) return;
+  const c = current.collection, f = current.family;
   const parsedLinks = parseLinksJSON(byId("ed-links").value);
   if (parsedLinks.error) {
     setText("editor-error", parsedLinks.error);
@@ -389,31 +421,34 @@ async function submitEditorSave() {
     links: parsedLinks.links,
     body: byId("ed-body").value,
   };
-  if (state.current.saveState.exists) {
-    body.base_version = state.current.saveState.baseVersion;
+  if (current.saveState.exists) {
+    body.base_version = current.saveState.baseVersion;
   }
+  current.saving = true;
   const r = await apiFetch(encodePath(c, f), {
     method: "PUT",
     body: JSON.stringify(body),
     editor: state.editor,
   });
+  if (state.current !== current) return;
+  current.saving = false;
   if (r.authFailure) return;
   if (r.status === 200) {
-    state.current.saveState = afterSave(state.current.saveState, r.json.version);
-    state.current.version = r.json.version;
-    state.current.conflictId = null;
+    current.saveState = afterSave(current.saveState, r.json.version);
+    current.version = r.json.version;
+    current.conflictId = null;
     byId("editor-merge").hidden = true;
     setText("editor-save-state", `v${r.json.version} (base ${r.json.version})`);
     setText("editor-error", "");
   } else if (r.status === 409) {
     setText("editor-error",
       `version changed on the server — reload to see the latest. detail: ${r.json && r.json.detail || ""}`);
-    state.current.saveState = onConflict(state.current.saveState);
+    current.saveState = onConflict(current.saveState);
     // Capture the conflict id (if the server committed a record)
     // and surface the merge-view button. A 409 with no conflict_id
     // (e.g. a future error envelope) leaves the button hidden.
     const cid = r.json && typeof r.json.conflict_id === "number" ? r.json.conflict_id : null;
-    state.current.conflictId = cid;
+    current.conflictId = cid;
     byId("editor-merge").hidden = (cid == null);
   } else {
     setText("editor-error", `Save failed: HTTP ${r.status} ${r.body || ""}`);
@@ -422,17 +457,39 @@ async function submitEditorSave() {
 
 // ---------- history ----------
 
+function clearHistoryContext() {
+  state.historyDocument = null;
+  state.historyVersions = [];
+  state.historyPicked = new Set();
+  byId("history-list").replaceChildren();
+  hideEl("history-diff-controls");
+  const diff = byId("history-diff");
+  diff.replaceChildren();
+  diff.hidden = true;
+  const fallback = byId("history-fallback");
+  fallback.replaceChildren();
+  fallback.hidden = true;
+}
+
 async function enterHistoryView() {
   if (!state.current) return;
+  const current = state.current;
+  const generation = ++state.historyGen;
+  const c = current.collection, f = current.family;
+  const sameHistory = state.historyDocument &&
+    state.historyDocument.collection === c && state.historyDocument.family === f;
+  if (!sameHistory) clearHistoryContext();
   showView("history");
-  const c = state.current.collection, f = state.current.family;
   setText("history-path", `${c} / ${f}`);
+  setText("history-error", "");
   const r = await apiFetch(encodePath(c, f) + "/versions", { method: "GET" });
+  if (state.current !== current || state.historyGen !== generation) return;
   if (r.authFailure) return;
   if (r.status !== 200) {
-    setText("history-path", `History failed: HTTP ${r.status} ${r.body || ""}`);
+    setText("history-error", `History failed: HTTP ${r.status} ${r.body || ""}`);
     return;
   }
+  state.historyDocument = { collection: c, family: f };
   state.historyVersions = (r.json && r.json.versions) || [];
   state.historyPicked = new Set();
   renderHistoryList();
@@ -458,6 +515,7 @@ function renderHistoryList() {
 }
 
 function toggleHistoryPick(version, li) {
+  setText("history-error", "");
   if (state.historyPicked.has(version)) {
     state.historyPicked.delete(version);
     li.classList.remove("picked");
@@ -485,34 +543,42 @@ function makeReadOnlyBodyLink(version) {
 
 async function viewHistoryVersion(version) {
   if (!state.current) return;
-  const collection = state.current.collection, family = state.current.family;
+  const current = state.current;
+  const generation = ++state.historyGen;
+  const collection = current.collection, family = current.family;
   const r = await apiFetch(encodePath(collection, family) + "?version=" + version, { method: "GET" });
+  if (state.current !== current || state.historyGen !== generation) return;
   if (r.authFailure) return;
+  if (r.status !== 200) {
+    setText("history-error", `View failed: HTTP ${r.status} ${r.body || ""}`);
+    return;
+  }
+  setText("history-error", "");
   const pre = byId("history-diff");
   pre.hidden = false;
   byId("history-fallback").hidden = true;
-  if (r.status === 200) {
-    pre.textContent = `v${r.json.version} (${r.json.status}) body:\n` + r.json.body;
-  } else {
-    pre.textContent = `view failed: HTTP ${r.status} ${r.body || ""}`;
-  }
+  pre.textContent = `v${r.json.version} (${r.json.status}) body:\n` + r.json.body;
 }
 
 async function diffTwoVersions(collection, family, versions) {
   if (versions.length !== 2) {
-    setText("history-path", "pick exactly two versions");
+    setText("history-error", "Pick exactly two versions.");
     return;
   }
+  const current = state.current;
+  const generation = ++state.historyGen;
   const [va, vb] = versions;
   const [a, b] = await Promise.all([
     apiFetch(encodePath(collection, family) + "?version=" + va, { method: "GET" }),
     apiFetch(encodePath(collection, family) + "?version=" + vb, { method: "GET" }),
   ]);
+  if (state.current !== current || state.historyGen !== generation) return;
   if (a.authFailure || b.authFailure) return;
   if (a.status !== 200 || b.status !== 200) {
-    setText("history-path", `diff fetch failed: ${a.status}/${b.status}`);
+    setText("history-error", `Diff fetch failed: ${a.status}/${b.status}`);
     return;
   }
+  setText("history-error", "");
   const aLines = a.json.body.split("\n");
   const bLines = b.json.body.split("\n");
   const result = lineDiff(aLines, bLines);
