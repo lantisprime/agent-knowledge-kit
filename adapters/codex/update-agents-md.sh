@@ -4,11 +4,12 @@
 #
 # Idempotent: replaces the block between the markers on every run; creates
 # the file if absent; leaves everything outside the markers untouched.
-# Run it after each corpus sync (append to your sync cron).
+# Run it after each subscriber convergence pass.
 set -eu
 
 KNOWLEDGE_HOME="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../lib/kernel-path.sh
 . "$SCRIPT_DIR/../lib/kernel-path.sh"
 TARGET="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
@@ -20,7 +21,7 @@ if KERNEL=$(akk_resolve_kernel "$KNOWLEDGE_HOME"); then
 else
     resolve_rc=$?
     if [ "$resolve_rc" -eq 2 ]; then
-        echo "kernel missing under $KNOWLEDGE_HOME/corpus — run sync.sh first" >&2
+        echo "kernel missing under $KNOWLEDGE_HOME/corpus — run the knowledge-server subscriber first" >&2
     fi
     exit 1
 fi

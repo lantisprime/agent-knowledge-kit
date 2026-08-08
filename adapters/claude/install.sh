@@ -10,7 +10,7 @@ set -eu
 
 KNOWLEDGE_HOME="${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}"
 HOOK="$KNOWLEDGE_HOME/claude-kernel-hook.sh"
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 KERNEL_LIB="$SCRIPT_DIR/../lib/kernel-path.sh"
 
 [ -f "$KERNEL_LIB" ] || { echo "kernel validator missing at $KERNEL_LIB" >&2; exit 1; }
@@ -30,7 +30,7 @@ if KERNEL=$(akk_resolve_kernel "$KH"); then
 else
     resolve_rc=$?
     if [ "$resolve_rc" -eq 2 ]; then
-        echo "WARNING: agent-knowledge kernel missing under $KH/corpus — run sync.sh; operating without the environment contract."
+        echo "WARNING: agent-knowledge kernel missing under $KH/corpus — run the knowledge-server subscriber; operating without the environment contract."
     fi
     exit 0
 fi

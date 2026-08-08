@@ -1,18 +1,16 @@
-# Delivery trust boundary plan
+# Superseded delivery trust boundary plan
 
-Status: **accepted design; fixture transaction implemented, boundary pending**
-(2026-08-01)
+Status: **superseded 2026-08-04; implementation retired 2026-08-08**
 
-Implementation note: `publisher/publish.sh` and its portable regressions cover
-only the authenticated-test-fixture publication transaction. Production
-authentication, successful two-principal platform evidence, every-ancestor
-and installed-code proof, orphan-lock recovery, and mandatory harness wiring
-remain pending. This note does not alter the frozen requirements below.
+The accepted knowledge-server plan (`knowledge-server.md`) replaced this
+two-principal/Git delivery model because the fixed operator constraint is one
+OS user per host and the server database is now the store of record. The
+fixture publisher and its privileged/portable tests were removed at cutover.
+The text below is retained as a historical decision record only. It is not an
+active contract, roadmap, or source of current guarantees.
 
-Decision: adopt the separate-identity, immutable-publication resolution for
-`C1-b`. Local agents are not fully trusted merely because they share an OS
-account with today's updater. This plan freezes the contract for
-architecture-plan step 1; it does not make the current scripts hardened.
+Historical decision: adopt the separate-identity, immutable-publication
+resolution for `C1-b`. Do not implement it without a new operator decision.
 
 In this plan, **corpus release** means one authenticated, versioned corpus
 publication. A **kit release** is the separately governed version of this

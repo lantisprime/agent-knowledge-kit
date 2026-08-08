@@ -270,6 +270,34 @@ func corpusLink(t *testing.T, home string) string {
 
 // --- tests ---
 
+func TestFlipCorpusSwitchesRelease(t *testing.T) {
+	home := t.TempDir()
+	for _, id := range []string{"1", "2"} {
+		if err := os.MkdirAll(filepath.Join(home, "releases", id), 0o755); err != nil {
+			t.Fatalf("create release %s: %v", id, err)
+		}
+	}
+
+	if err := flipCorpus(home, "1"); err != nil {
+		t.Fatalf("flip to release 1: %v", err)
+	}
+	if link := corpusLink(t, home); link != filepath.Join("releases", "1") {
+		t.Fatalf("corpus link after first flip = %q, want releases/1", link)
+	}
+
+	if err := flipCorpus(home, "2"); err != nil {
+		t.Fatalf("flip to release 2: %v", err)
+	}
+	if link := corpusLink(t, home); link != filepath.Join("releases", "2") {
+		t.Fatalf("corpus link after second flip = %q, want releases/2", link)
+	}
+	for _, id := range []string{"1", "2"} {
+		if fi, err := os.Stat(filepath.Join(home, "releases", id)); err != nil || !fi.IsDir() {
+			t.Fatalf("release %s not retained as a directory: info=%v err=%v", id, fi, err)
+		}
+	}
+}
+
 func TestConvergeHappyPath(t *testing.T) {
 	home := t.TempDir()
 	docs := []testDoc{{"kernel/kernel.md", []byte("# Kernel\nhello\n")}}
@@ -338,6 +366,57 @@ func TestConvergeIdempotentSecondPass(t *testing.T) {
 	}
 	if hb := srv.lastHeartbeat(); !hb.OK || hb.ResyncApplied {
 		t.Fatalf("second-pass heartbeat = %+v, want ok=true resync_applied=false", hb)
+	}
+}
+
+func TestConvergeNewReleaseFlipsCorpus(t *testing.T) {
+	home := t.TempDir()
+	docs1 := []testDoc{{"kernel/kernel.md", []byte("# Kernel\nrelease one\n")}}
+	hash1 := computeContentHash(docs1)
+	docs2 := []testDoc{{"kernel/kernel.md", []byte("# Kernel\nrelease two\n")}}
+	hash2 := computeContentHash(docs2)
+
+	srv := newFakeServer()
+	srv.setCurrent(currentRelease{ReleaseID: 1, ContentHash: hash1, Docs: docsToManifest(docs1)})
+	srv.setArchive(1, buildTar(docs1))
+	srv.setArchive(2, buildTar(docs2))
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	converge(ts.URL, home, "t1", "", testClient())
+	if link := corpusLink(t, home); link != filepath.Join("releases", "1") {
+		t.Fatalf("corpus link after release 1 = %q, want releases/1", link)
+	}
+
+	srv.setCurrent(currentRelease{ReleaseID: 2, ContentHash: hash2, Docs: docsToManifest(docs2)})
+	converge(ts.URL, home, "t1", "", testClient())
+
+	if link := corpusLink(t, home); link != filepath.Join("releases", "2") {
+		t.Fatalf("corpus link after release 2 = %q, want releases/2", link)
+	}
+	if got := readCorpusFile(t, home, "kernel/kernel.md"); string(got) != string(docs2[0].body) {
+		t.Fatalf("active kernel after release 2 = %q, want %q", got, docs2[0].body)
+	}
+	oldBody, err := os.ReadFile(filepath.Join(home, "releases", "1", "kernel", "kernel.md"))
+	if err != nil {
+		t.Fatalf("read retained release 1: %v", err)
+	}
+	if string(oldBody) != string(docs1[0].body) {
+		t.Fatalf("retained release 1 changed: got %q want %q", oldBody, docs1[0].body)
+	}
+	applied, err := os.ReadFile(filepath.Join(home, ".applied"))
+	if err != nil {
+		t.Fatalf("read .applied: %v", err)
+	}
+	if want := "2 " + hash2 + "\n"; string(applied) != want {
+		t.Fatalf(".applied after release 2 = %q, want %q", applied, want)
+	}
+	if srv.archiveHitCount(1) != 1 || srv.archiveHitCount(2) != 1 {
+		t.Fatalf("archive hits = release1:%d release2:%d, want 1 each",
+			srv.archiveHitCount(1), srv.archiveHitCount(2))
+	}
+	if hb := srv.lastHeartbeat(); !hb.OK || hb.ReleaseID != 2 || hb.ResyncApplied || hb.Error != nil {
+		t.Fatalf("release-2 heartbeat = %+v, want ok release_id=2", hb)
 	}
 }
 
@@ -542,8 +621,8 @@ func TestConvergeResyncBeliefErasure(t *testing.T) {
 	}
 }
 
-// TestConvergeResyncAfterTamper is the F1 regression: the corpus
-// checkout is agent-writable (the kit's threat model), so a
+// TestConvergeResyncAfterTamper is the F1 regression: the materialized corpus
+// is agent-writable (the kit's threat model), so a
 // same-release-id force-resync must NOT reuse whatever is already on
 // disk at releases/<id> — it could have been tampered with locally.
 // The subscriber must always flip corpus onto the freshly downloaded,
@@ -566,7 +645,7 @@ func TestConvergeResyncAfterTamper(t *testing.T) {
 	}
 
 	// Simulate local tampering of the materialized release dir (the
-	// corpus checkout is agent-writable per the kit's threat model).
+	// materialized corpus is agent-writable per the kit's threat model).
 	kernelOnDisk := filepath.Join(home, "releases", "1", "kernel", "kernel.md")
 	if err := os.WriteFile(kernelOnDisk, []byte("TAMPERED"), 0o644); err != nil {
 		t.Fatalf("simulate tamper: %v", err)

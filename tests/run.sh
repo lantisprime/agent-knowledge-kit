@@ -1,9 +1,10 @@
 #!/bin/sh
-# Portable regression suite for adapter source containment and managed markers.
+# Portable regression suite for adapter source containment, managed markers,
+# and subscriber-materialized corpus delivery.
 set -u
 
-TEST_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
-REPO_ROOT=$(CDPATH= cd "$TEST_DIR/.." && pwd -P)
+TEST_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+REPO_ROOT=$(CDPATH='' cd "$TEST_DIR/.." && pwd -P)
 CLAUDE_INSTALL="$REPO_ROOT/adapters/claude/install.sh"
 CODEX_UPDATE="$REPO_ROOT/adapters/codex/update-agents-md.sh"
 PI_RUN="$REPO_ROOT/adapters/pi/run.sh"
@@ -34,6 +35,7 @@ new_case() {
 write_pi_stub() {
     stub_dir=$1
     mkdir -p "$stub_dir"
+    # shellcheck disable=SC2016 # Write these expansions into the stub.
     printf '%s\n' \
         '#!/bin/sh' \
         ': > "${PI_CALLED:?}"' \
@@ -286,7 +288,7 @@ test_valid_layout() {
         mkdir -p "$corpus_root/kernel"
         printf 'LOWER PRECEDENCE KERNEL\n' > "$corpus_root/kernel/kernel.md"
     fi
-    kernel_expected=$(CDPATH= cd "$(dirname "$kernel")" && pwd -P)/${kernel##*/}
+    kernel_expected=$(CDPATH='' cd "$(dirname "$kernel")" && pwd -P)/${kernel##*/}
     if [ "$tracking" = git ]; then
         make_git_corpus "$corpus_root"
     elif [ "$tracking" = parent-git ]; then
@@ -331,6 +333,84 @@ test_valid_layout() {
     fi
 }
 
+test_subscriber_materialized_cutover() {
+    case_root=$(new_case subscriber-materialized-cutover)
+    knowledge_home="$case_root/knowledge"
+    codex_home="$case_root/codex"
+    target="$codex_home/AGENTS.md"
+    stub_dir="$case_root/bin"
+    pi_called="$case_root/pi.called"
+    pi_args="$case_root/pi.args"
+    release_one='SUBSCRIBER RELEASE ONE'
+    release_two='SUBSCRIBER RELEASE TWO'
+
+    mkdir -p "$knowledge_home/releases/1/kernel" \
+        "$knowledge_home/releases/2/kernel" "$codex_home"
+    printf '%s\n' "$release_one" > \
+        "$knowledge_home/releases/1/kernel/kernel.md"
+    printf '%s\n' "$release_two" > \
+        "$knowledge_home/releases/2/kernel/kernel.md"
+    ln -s releases/1 "$knowledge_home/corpus"
+
+    KNOWLEDGE_HOME="$knowledge_home" "$CLAUDE_INSTALL" > /dev/null
+    KNOWLEDGE_HOME="$knowledge_home" "$knowledge_home/claude-kernel-hook.sh" \
+        > "$case_root/claude-one.out" 2> "$case_root/claude-one.err"
+    printf 'operator prefix\n' > "$target"
+    KNOWLEDGE_HOME="$knowledge_home" CODEX_HOME="$codex_home" \
+        "$CODEX_UPDATE" > "$case_root/codex-one.out" \
+        2> "$case_root/codex-one.err"
+    cp "$target" "$case_root/codex-one.snapshot"
+    write_pi_stub "$stub_dir"
+    PATH="$stub_dir:$PATH" PI_CALLED="$pi_called" PI_ARGS="$pi_args" \
+        KNOWLEDGE_HOME="$knowledge_home" "$PI_RUN" --model fixture \
+        > "$case_root/pi-one.out" 2> "$case_root/pi-one.err"
+    cp "$pi_args" "$case_root/pi-one.args"
+    release_one_path=$(CDPATH='' cd -P \
+        "$knowledge_home/releases/1/kernel" && pwd -P)/kernel.md
+
+    rm "$knowledge_home/corpus"
+    ln -s releases/2 "$knowledge_home/corpus"
+
+    KNOWLEDGE_HOME="$knowledge_home" "$knowledge_home/claude-kernel-hook.sh" \
+        > "$case_root/claude-two.out" 2> "$case_root/claude-two.err"
+    KNOWLEDGE_HOME="$knowledge_home" CODEX_HOME="$codex_home" \
+        "$CODEX_UPDATE" > "$case_root/codex-two.out" \
+        2> "$case_root/codex-two.err"
+    PATH="$stub_dir:$PATH" PI_CALLED="$pi_called" PI_ARGS="$pi_args" \
+        KNOWLEDGE_HOME="$knowledge_home" "$PI_RUN" --model fixture \
+        > "$case_root/pi-two.out" 2> "$case_root/pi-two.err"
+    release_two_path=$(CDPATH='' cd -P \
+        "$knowledge_home/releases/2/kernel" && pwd -P)/kernel.md
+
+    if grep -qx "$release_one" "$case_root/claude-one.out" &&
+        grep -qx "$release_one" "$case_root/codex-one.snapshot" &&
+        grep -qx "$release_one_path" "$case_root/pi-one.args" &&
+        grep -qx "$release_two" "$case_root/claude-two.out" &&
+        grep -qx "$release_two" "$target" &&
+        ! grep -qx "$release_one" "$target" &&
+        grep -qx "$release_two_path" "$pi_args" &&
+        [ -e "$pi_called" ]; then
+        pass 'subscriber materialized releases are consumed across all adapters'
+    else
+        fail 'subscriber materialized releases are consumed across all adapters'
+    fi
+}
+
+test_legacy_delivery_retired() {
+    if [ ! -e "$REPO_ROOT/adapters/sync.sh" ] &&
+        [ ! -L "$REPO_ROOT/adapters/sync.sh" ] &&
+        [ ! -e "$REPO_ROOT/publisher/publish.sh" ] &&
+        [ ! -L "$REPO_ROOT/publisher/publish.sh" ] &&
+        [ ! -e "$TEST_DIR/publisher/run.sh" ] &&
+        [ ! -L "$TEST_DIR/publisher/run.sh" ] &&
+        [ ! -e "$TEST_DIR/publisher/two-principal.sh" ] &&
+        [ ! -L "$TEST_DIR/publisher/two-principal.sh" ]; then
+        pass 'superseded git and two-principal delivery code is retired'
+    else
+        fail 'superseded git and two-principal delivery code is retired'
+    fi
+}
+
 begin='<!-- agent-knowledge-kit:begin (managed block, do not edit by hand) -->'
 end='<!-- agent-knowledge-kit:end -->'
 
@@ -346,14 +426,11 @@ test_valid_layout flat
 test_valid_layout nested
 test_valid_layout flat non-git
 test_valid_layout flat parent-git
+test_subscriber_materialized_cutover
+test_legacy_delivery_retired
 
 printf '1..%d\n' "$tests"
 if [ "$failures" -ne 0 ]; then
     printf '%d test(s) failed\n' "$failures" >&2
     exit 1
 fi
-
-# Keep the fixture-only publication transaction in the canonical portable
-# verification command. It emits its own TAP document and fails this runner on
-# any publication regression.
-"$TEST_DIR/publisher/run.sh"

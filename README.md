@@ -1,190 +1,164 @@
 # agent-knowledge-kit
 
-A generic, git-native **knowledge layer for AI agent harnesses** — curated
-durable knowledge plus **deterministic context injection**, so agents start
-every session already knowing your environment's rules instead of
-rediscovering (or guessing) them.
+A server-backed knowledge layer for AI agent harnesses: curated durable
+knowledge plus deterministic context injection, so agents start each session
+with the operating rules they need.
 
-Works with Claude Code, OpenAI Codex CLI, and [pi](https://github.com/badlogic/pi-mono).
-No server, no database, no vendor lock: a git repo, a sync script, and one
-small adapter per harness.
+The kit works with Claude Code, OpenAI Codex CLI, and
+[pi](https://github.com/badlogic/pi-mono). A single Go server owns the writable
+knowledge store and release history. Thin subscribers materialize verified
+release snapshots on consumer hosts; small POSIX-shell adapters inject the
+Tier A kernel through each harness's native context mechanism.
 
-## The thesis
+## Status
 
-> The model can only act on what reaches the context window.
-> The harness decides what gets there. Storage is the easy part —
-> **injection is the architecture.**
+Knowledge-server v1 is implemented. The legacy Git corpus transport and the
+two-principal fixture publisher were retired in the step-7 cutover. Forgejo is
+the authoritative Git service for this kit's source and releases, but it is
+not a knowledge transport or store.
 
-Agent memory has four tiers (working / episodic / semantic / procedural).
-This kit implements delivery for the **procedural and semantic** tiers: the
-standing knowledge — access paths, sandbox rules, runbooks, hard limits —
-that every agent in your environment must have, whether or not it thinks to
-ask.
+The server is intentionally single-instance SQLite in v1. Environment
+deployment, host inventory, backups, and service supervision belong to the
+consumer repository.
 
-Pull-based retrieval (search, RAG, memory queries) fails silently: the agent
-that doesn't know a fact exists doesn't search for it, then states a wrong
-answer with confidence. The fix is **push-first**:
+## Why push knowledge
 
-| Tier | Mode | Mechanism |
+Pull-only retrieval fails silently: an agent that does not know a fact exists
+will not search for it. The kit uses three delivery tiers:
+
+| Tier | Mode | v1 mechanism |
 |---|---|---|
-| A | always injected | a hand-curated **kernel** (~1–2k tokens hard cap) delivered into every session |
-| B | injected on trigger | full procedure docs loaded when the task/command warrants |
-| C | queried on demand | your search/memory tooling; Tier A pointers make it discoverable |
+| A | Always injected | A capped kernel materialized and passed to every fresh session |
+| B | Loaded on trigger | Procedure documents materialized on each host; trigger loader remains consumer/harness work |
+| C | Queried on demand | Future query collections and external search/memory tools |
 
-## Kit vs. corpus
+## Components
 
-- **This repo (the kit)** is the public, generic framework: schema, kernel
-  template, sync tooling, harness adapters. It contains nothing about any
-  real environment.
-- **Your corpus** is a separate repo (usually private!) holding your actual
-  kernel and docs, written against the kit's schema. Access paths, hostnames,
-  and internal topology belong there — never in a public repo.
+```text
+human operator -> web UI / HTTP API -> SQLite store
+                                      -> immutable release snapshot
+                                      -> authenticated subscriber
+                                      -> $KNOWLEDGE_HOME/releases/<id>
+                                      -> atomic $KNOWLEDGE_HOME/corpus pointer
+                                      -> Claude / Codex / pi adapter
+                                      -> fresh agent context
+```
 
-## Governance and consumption
+- `knowledge-server/` contains the Go server, embedded curation UI, SQLite
+  store, API, fleet view, conflicts, release history, and subscriber.
+- `adapters/` contains harness-specific Tier A injection. Adapters know only
+  `$KNOWLEDGE_HOME/corpus`; they do not know the server exists.
+- `kernel/kernel.template.md` is a body template for the Tier A kernel.
+- `schema/frontmatter.md` documents the equivalent portable metadata shape;
+  the v1 server stores metadata in SQLite and does not import frontmatter.
 
-The kit governs and releases itself from this repository. Its architecture,
-schemas, adapters, tests, compatibility policy, and release tags are not
-owned by any environment repository. A consumer may propose a change, but a
-generic change is reviewed and released here before the consumer adopts it.
+## Local quickstart
 
-Consumers own environment integration: they pin an immutable kit release,
-deploy its adapters, validate their private corpus against the pinned schema,
-and monitor convergence. The dependency is one-way: kit release → consumer
-pin → private corpus. The kit never reads a consumer repository as a design
-or release input.
+The loopback configuration below is for evaluation on one machine. Do not
+expose it on a network.
 
-Forgejo is the authoritative Git service and the only push target. Do not
-push this repository to GitHub; any separately authorized read mirror is not
-a release authority.
-
-## Prototype quickstart
-
-The commands below describe the shipped mutable-checkout prototype. They do
-not implement the accepted separate-identity, immutable-publication boundary;
-do not treat this workflow as hardened deployment.
-
-1. Create your corpus repo from the template:
+1. Start the server:
 
    ```sh
-   ./adapters/sync.sh init <your-corpus-git-url>   # clones to $KNOWLEDGE_HOME
+   cd knowledge-server
+   go run . -db knowledge.db
    ```
 
-   `KNOWLEDGE_HOME` defaults to `~/.config/agent-knowledge`. Multiple
-   remotes are supported (comma-separated) and tried in order — useful when
-   the canonical remote is only reachable inside one network and a mirror
-   serves the rest.
+2. Open `http://127.0.0.1:8471/`. Create an active document in the `kernel`
+   collection, preview the release, and publish it. The server blocks a cut if
+   the kernel exceeds 2,000 words or 24 KiB.
 
-2. Write your kernel (`kernel/kernel.md` in your corpus) from
-   `kernel/kernel.template.md`. Keep it under the cap; everything that
-   doesn't make the cut becomes a Tier B doc.
+3. Materialize the current release:
 
-3. Wire or launch the adapters:
+   ```sh
+   cd knowledge-server
+   go run ./subscriber \
+     -server http://127.0.0.1:8471 \
+     -home "${KNOWLEDGE_HOME:-$HOME/.config/agent-knowledge}" \
+     -once
+   ```
+
+4. Wire the harness adapter:
 
    | Harness | Tier A wiring |
    |---|---|
-   | Claude Code | `adapters/claude/install.sh` — SessionStart hook emits the kernel |
-   | Codex CLI | `adapters/codex/update-agents-md.sh` — managed block in `~/.codex/AGENTS.md` (global, loads every session) |
-   | pi | launch through `adapters/pi/run.sh`, which validates the kernel before adding `--append-system-prompt`; pi also auto-discovers repo `AGENTS.md`/`CLAUDE.md` |
+   | Claude Code | `adapters/claude/install.sh`; its SessionStart hook resolves the active kernel on every new session |
+   | Codex CLI | `adapters/codex/update-agents-md.sh`; run it after each subscriber convergence pass |
+   | pi | launch through `adapters/pi/run.sh` |
 
-   The code-backed adapters refuse symlinked, non-regular, or path-escaping
-   kernels and reject non-blob kernel entries when the corpus is a Git
-   checkout. The Codex adapter also refuses kernel content that contains
-   either managed-block marker as a whole line. This is source containment,
-   not a complete delivery-integrity boundary: the current checkout remains
-   mutable by the agent uid (`C1-b` in `docs/architecture.md`).
+   The Codex adapter copies the current kernel into its managed `AGENTS.md`
+   block. A typical scheduled Codex convergence therefore runs the subscriber
+   with `-once`, then runs the Codex updater. Both commands are idempotent and
+   preserve the previous release when the server is unavailable.
 
-4. Schedule `sync.sh pull` (cron / systemd timer / launchd) so every host
-   converges on merge. Hosts keep their last-synced copy offline — the
-   knowledge survives exactly the outages it documents.
+5. Open a fresh harness session and ask for the environment's operating
+   rules. The answer should come from injected context without a file read or
+   retrieval prompt.
 
-5. Verify the loop: open a **fresh agent session** on a synced host and ask
-   the agent what your environment's rules are — the answer must come from
-   context, with zero prompting and zero file reads.
+## Network deployment
 
-## Fixture-only publisher primitive
+Every endpoint is authenticated when `-operator-token-file` is configured.
+The server refuses a non-loopback bind unless both authentication and TLS are
+enabled, except for the explicit dangerous `--insecure-no-auth` override.
 
-`publisher/publish.sh` implements the local transaction portion of the
-accepted delivery boundary for authenticated test fixtures: publisher-owned
-logical roots, strict release identities, same-filesystem staging, immutable
-release bytes, an atomic `current` selector, serialized anti-rollback state,
-and a fail-loud integrity check. Its callable promotion verb is deliberately
-named `promote-fixture`; `promote` always fails with
-`authentication-unavailable`.
-
-The candidate must be a physical child of `<control-root>/quarantine/` with a
-`corpus/` directory and this deliberately test-only descriptor:
-
-```text
-agent-knowledge-kit-authenticated-test-fixture-v1
-sequence <1-18 digit nonzero decimal>
-digest <32-128 lowercase hexadecimal characters>
-```
-
-The descriptor asserts pre-authenticated test identity; it does not bind
-content cryptographically and must never be treated as the step-2 manifest.
-
-This is development infrastructure, not a production deployment interface.
-The real corpus manifest and signer policy belong to architecture step 2, the
-privileged macOS/Linux test still needs provisioned principals, and no shipped
-harness adapter reads the publication root. Therefore the mutable-checkout
-quickstart above remains the only working adapter path and remains unhardened.
-
-Portable verification is part of `sh tests/run.sh`. The privileged probe is:
+Generate an operator token without placing it in a command URL or chat:
 
 ```sh
-sudo -n env \
-  AKK_TEST_PUBLISHER=<preprovisioned-publisher> \
-  AKK_TEST_AGENT=<preprovisioned-agent> \
-  AKK_TEST_SHARED_GROUP=<preprovisioned-shared-group> \
-  sh tests/publisher/two-principal.sh
+cd knowledge-server
+go run . \
+  -operator-token-file /protected/path/operator.token \
+  -init-operator-token
 ```
 
-The runner never creates accounts. Exit 77 means prerequisites were absent;
-it is not proof that the delivery boundary passed.
+Restart without `-init-operator-token`, supplying `-tls-cert`, `-tls-key`, and
+the desired `-listen` address. Mint one host token per subscriber through the
+operator-authenticated API, store it in a mode-0600 file, and pass that file
+with subscriber `-token-file`. Use `-ca-file` for a private CA.
 
-## Corpus layout
+The subscriber verifies the release manifest, every archive entry, and the
+content hash before installing a fresh version directory and atomically
+switching `corpus`. Any failure retains the last-good release and reports a
+best-effort heartbeat.
 
+## Curation and lifecycle
+
+- Every save creates an immutable version; one active version is allowed per
+  collection/family.
+- Draft versions never enter a release.
+- Publish preview and cut use the same candidate computation. The UI submits
+  the preview hash as a cut precondition to detect intervening edits.
+- Stale optimistic-lock saves open edit-conflict records. Claim conflicts can
+  be flagged manually. Kernel-cap failures open policy conflicts.
+- Force-resync causes a host to re-fetch, verify, and install a fresh directory
+  even when its release id already matches.
+
+The database is the only writable knowledge state. Consumer hosts do not
+merge, reconcile, or edit materialized releases.
+
+## Development and verification
+
+```sh
+sh tests/run.sh
+
+cd knowledge-server
+go test -race ./...
+node --test ui/lib_test.mjs
 ```
-corpus/
-├── kernel/kernel.md        # Tier A — the always-injected contract
-├── docs/…                  # Tier B — full procedures, runbooks, guides
-└── schema/                 # copied from the kit; your lint rules
-```
 
-Every doc carries frontmatter (see `schema/frontmatter.md`): `status`,
-`supersedes`, `owner`, `audience`, `verify`, `generated-from`. The lifecycle
-rules that keep memory from rotting:
+`tests/run.sh` covers adapter containment, managed-marker safety, and the
+subscriber-materialized cutover shape. The Go suite covers store/API/auth/UI
+and subscriber convergence, including fail-soft behavior, archive traversal,
+hash mismatch, TLS pinning, force-resync, and fleet/conflict behavior.
 
-- **Promotion ladder** — sessions → summaries → facts → procedures. When a
-  lesson recurs, distill it into a doc via PR; leave a pointer behind.
-- **Contradiction rule** — new truth supersedes *in place*; old truth
-  survives as git history and a `superseded` doc, never as a peer that can
-  outrank current state.
-- **Ownership** — the kernel and anything approval-gate-shaped is manually
-  curated and PR-only. Never auto-extract your safety rules.
-- **Verifiability** — prefer docs whose claims carry a `verify:` command.
-  Capability facts drift; a one-line check beats a stale assertion.
+## Governance
 
-## Transports
+This public repository owns the generic architecture, schemas, adapters,
+tests, compatibility policy, and releases. It must contain no real environment
+names, addresses, topology, credentials, or private knowledge.
 
-For the current prototype, plain `git` is the baseline and the only
-requirement. If your environment already has a file-distribution mechanism (a
-config-sync agent, rsync, object storage), it may deliver to the same
-`KNOWLEDGE_HOME` path. Hardened delivery must instead enter through the
-protected publisher/control path and expose only an authenticated immutable
-corpus publication; transport choice does not bypass that boundary.
-
-## Design questions to answer for your environment
-
-1. What is in working memory right now — what did the agent actually see?
-2. Which past session matters, and can the agent find it?
-3. Which facts are current, and what resolves a contradiction?
-4. Which workflow applies, and where is it encoded?
-5. What should be forgotten, and who owns the procedures?
-
-If you can answer these, you have an architecture. If not, you have
-scattered state — and scattered state works until the agent remembers the
-wrong thing and continues with confidence.
+Forgejo is the only permitted push and release authority. Consumers pin a kit
+release and own deployment and private server data; they do not define or
+publish the kit.
 
 ## License
 

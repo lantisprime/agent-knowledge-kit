@@ -1,12 +1,13 @@
 # Knowledge server — central store, web curation, thin subscribers
 
-Status: accepted direction (operator decision, 2026-08-04). This plan
+Status: **accepted and implemented v1** (operator decision 2026-08-04;
+cutover completed 2026-08-08). This plan
 supersedes the git-transport delivery model and the separate-identity
 delivery trust boundary (`delivery-trust-boundary.md`). Implementation
-has landed for build-order steps 1–6 (store + schema + release cut;
+has landed for build-order steps 1–7 (store + schema + release cut;
 thin subscriber with token-bound identity; authN; embedded curation
 UI; conflict records + merge view; fleet page + force-resync UI);
-the git transport is not yet retired — cutover is step 7.
+the Git transport and two-principal fixture publisher are retired.
 
 ## Operator constraints (fixed)
 
@@ -14,8 +15,9 @@ the git transport is not yet retired — cutover is step 7.
    publisher identity, no privileged fixtures or tests.
 2. Knowledge is not stored in Git or on a Git service. The server's
    database is the store of record.
-3. The server is the fleet's one dependency. Consumer hosts run one
-   thin subscriber and hold no writable synced state.
+3. The server is the fleet's one dependency. Consumer hosts run one thin
+   subscriber and hold no independently writable knowledge state; their only
+   local state is materialized releases plus the applied-release marker.
 4. Humans curate through the server's web UI, not through files.
 
 ## Decision
@@ -23,7 +25,7 @@ the git transport is not yet retired — cutover is step 7.
 Replace the git-clone transport with a master/replica knowledge server:
 
 - **Server** (one deployable): document store in an embedded database,
-  web curation UI, conflict management, an append-only release stream,
+  web curation UI, conflict management, append-only release history,
   and a consumer-host registry.
 - **Subscriber** (per host): a thin client that materializes released
   corpus bytes to `$KNOWLEDGE_HOME` and reports status. Adapters and
@@ -41,8 +43,8 @@ client state discovered after the fact.
 
 Scale follows from the same asymmetry. Write contention is independent
 of fleet size — hosts are not writers, so 5 or 90 hosts changes
-nothing on the write path. Reads are stateless and linear: one idle
-stream connection and one small release fetch per host. Client
+nothing on the write path. Reads are stateless and linear: one small
+poll plus one release fetch per changed host. Client
 credentials are one revocable token per host; content encryption is
 TLS to a single endpoint, so key rotation and host revocation are
 server-side operations, never fleet-wide re-key events.
@@ -111,7 +113,7 @@ trigger-loaded. Query-tier collections are not in the snapshot.
 - Per-document version history with diffs.
 - **Publish** cuts a release: an immutable snapshot (release id,
   content hash, manifest, corpus archive) written in one transaction
-  and appended to the release stream.
+  and appended to release history.
 
 ### Conflict management
 
@@ -162,7 +164,7 @@ conflicted, both versions, who resolved it, the winning version, when.
 
 ## Subscriber contract
 
-Receive "release N exists" (stream push; poll fallback) → fetch N →
+Poll for "release N exists" → fetch N →
 verify content hash → write to a fresh versioned dir → atomically flip
 the `corpus` pointer (the symlink adapters read; `$KNOWLEDGE_HOME/
 corpus` → `releases/<id>`) → heartbeat. Idempotent; no local state
@@ -178,7 +180,7 @@ ignores any host-token semantics).
 ## Stack
 
 - Server: single Go binary; embedded SQLite (Postgres later as a
-  config swap, not a v1 concern); embedded web UI; SSE release stream.
+  config swap, not a v1 concern); embedded web UI; polling release API.
 - Subscriber: single static Go binary per host.
 - This ends the sh-only convention for the delivery layer. Adapters
   stay POSIX sh and unchanged.
@@ -186,13 +188,13 @@ ignores any host-token semantics).
 ## What this supersedes
 
 - Git remotes, the `sync.sh` transport, and Git-service hosting of
-  knowledge: retire after cutover; keep until the server path runs
-  the full loop end to end.
-- `delivery-trust-boundary.md` and the two-principal publisher: the
+  knowledge: retired after the server path passed the full loop end to
+  end.
+- `delivery-trust-boundary.md` and the two-principal publisher are
+  superseded: the
   single-user constraint withdraws the local-integrity claims that
-  plan made; do not cite them as guarantees. Revise the
-  `docs/architecture.md` decision record in the same slice that
-  retires the code.
+  plan made; do not cite them as guarantees. The cutover revised
+  `docs/architecture.md` and retired the code in the same slice.
 - "Kernel edits are PR-only" becomes: kernel edits go through the web
   UI's diff-and-confirm publish with the cap lint enforced.
 
@@ -351,7 +353,8 @@ same digest in hex. The archive tar bytes are NOT what `content_hash`
 covers — a subscriber recomputes the hash from the materialized
 `path`+body set, not from the tar framing.
 
-**Release stream (SSE).** Output-only: emits `{"release_id",
+**Post-v1 target — release stream (SSE; not implemented).** Output-only:
+would emit `{"release_id",
 "content_hash"}` per cut release. Fire-and-forget broadcast — the
 server keeps no per-client state: no offsets, no acknowledgements, no
 replay. A client that misses events converges by reading
@@ -362,8 +365,8 @@ carry document bodies, accept writes, or track who is listening.
 uses the same endpoints and schemas as any other client. Never: touch
 the store directly.
 
-**Subscriber.** An asynchronous convergence loop: on a release event,
-on stream reconnect, and on a slow periodic poll, compare the
+**Subscriber.** A polling convergence loop: on startup and each configured
+interval, compare the
 server's current release to the locally applied one; if they differ,
 fetch, verify, apply. Idempotent — applying the same release twice is
 a no-op; there is no replay and nothing to acknowledge. Its whole
@@ -425,9 +428,12 @@ know the server exists.
    classification — dark after 5 min without a heartbeat — per-host
    error detail, pending-resync visibility, and a per-row force-resync
    action).
-7. Cutover: adapters read the subscriber-materialized corpus (no
-   adapter change expected); retire the git transport; update
-   `architecture.md`, `REPO_MAP.md`, README.
+7. Cutover. **Done** (adapters consume the subscriber-materialized
+   `corpus -> releases/<id>` shape; the portable suite covers pointer
+   changes across Claude, Codex, and pi; Git sync and the fixture-only
+   two-principal publisher plus their exclusive tests are removed;
+   `architecture.md`, `REPO_MAP.md`, README, contributor guidance,
+   schema reference, and kernel template describe the server path).
 
 ## Out of scope (v1)
 
@@ -436,10 +442,11 @@ know the server exists.
 - Automated claim-conflict detection.
 - Additional collections and machine-submitted streams (they need the
   additive schema changes noted in the Store section; nothing ships).
+- SSE release notifications; v1 polling is the correctness path.
 - Environment deployment, host inventory, and consumer migration
   plans — those belong to environment repositories.
 
-### Accepted residual risks (loopback-only v1)
+### Accepted residual risks (v1)
 
 Step 3 (AuthN) has landed. The authentication-dependent risks
 below are closed for unauthenticated and remote callers. Same-UID

@@ -1,52 +1,52 @@
----
-title: "{{ENV_NAME}} agent kernel"
-status: draft
-owner: "{{OWNER}}"
-audience: agent
-tier: A
----
-
 <!--
-  KERNEL TEMPLATE — the always-injected contract (Tier A).
+  TIER A KERNEL BODY TEMPLATE
 
-  Hard cap: ~1–2k tokens. Every line here is paid for in EVERY session of
-  EVERY agent on EVERY host. If it isn't a rule the agent must know before
-  its first tool call, it belongs in a Tier B doc — link it under
-  "Where to learn more".
+  Paste the rendered body into an active document in the server's `kernel`
+  collection. Metadata such as title, status, owner, audience, tier, and
+  triggers is stored separately by the server; do not add frontmatter here.
 
-  Replace {{placeholders}}; delete the comments; keep the section shape.
+  Release cut enforces a 2,000-word cap and a 24-KiB byte backstop. Every line
+  is paid for in every fresh agent session. If it is not required before the
+  first tool call, put it in a Tier B `docs` document and link it below.
+
+  Replace placeholders, delete comments, and keep the section shape.
 -->
 
 # {{ENV_NAME}} — agent operating contract
 
 ## Access paths
-<!-- The blessed way to reach each system. State the mechanism AND the
-     deliberate absences (e.g. "no local kubeconfig by design"). -->
+
+<!-- State the blessed mechanism and deliberate absences. -->
+
 - {{SYSTEM_1}}: `{{ACCESS_COMMAND_1}}`
 - {{SYSTEM_2}}: `{{ACCESS_COMMAND_2}}`
 
 ## Hard limits — never do
-<!-- The never-touch list. Name concrete resources, not categories. -->
+
+<!-- Name concrete protected resources, not broad categories. -->
+
 - Never modify: {{PROTECTED_RESOURCES}}
 - Never read secrets outside: {{SECRET_SCOPE}}
-- Credentials live in {{SECRET_STORE}} — never in repos, URLs, or chat.
+- Credentials live in {{SECRET_STORE}} — never in repositories, URLs, or chat.
 
 ## Test-sandbox contract
-<!-- What "experiments are allowed" means, precisely. -->
-- All test writes stay inside ONE fresh, uniquely named {{SANDBOX_UNIT}}
-  (naming: `{{SANDBOX_NAMING}}`).
-- Check capacity/headroom before creating anything.
-- When done: delete the sandbox and SHOW it gone ({{TEARDOWN_PROOF}}).
+
+- Keep all test writes inside one fresh, uniquely named {{SANDBOX_UNIT}}
+  (`{{SANDBOX_NAMING}}`).
+- Check capacity before creating anything.
+- Delete the sandbox at the end and show teardown proof:
+  `{{TEARDOWN_PROOF}}`.
 
 ## Change control
+
 - {{CHANGE_CONTROL_SUMMARY}}
-  <!-- e.g. "All deploys via <pipeline>; direct applies to shared systems
-       are forbidden; approval tiers are defined in <doc>." -->
 
 ## Stop conditions
-- Outside the bounds above → stop and ask; don't improvise.
+
+- Outside the bounds above: stop and ask; do not improvise.
 - {{ESCALATION_CONTACT_OR_CHANNEL}}
 
-## Where to learn more (Tier B/C)
-- Full guides: `{{KNOWLEDGE_HOME}}/corpus/docs/`
-- Query: {{TIER_C_TOOLING}}
+## Where to learn more
+
+- Tier B procedures: `{{KNOWLEDGE_HOME}}/corpus/docs/`
+- Tier C query: {{TIER_C_TOOLING}}
