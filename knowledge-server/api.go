@@ -21,6 +21,7 @@ import (
 type api struct {
 	st   *store.Store
 	auth *authState // nil = authentication disabled (loopback posture)
+	now  func() time.Time
 }
 
 // newMux wires each route through secure with its access policy:
@@ -29,7 +30,7 @@ type api struct {
 // handlers. With auth == nil every request passes as the operator
 // principal (pre-authN behavior, unchanged).
 func newMux(st *store.Store, auth *authState) *http.ServeMux {
-	a := &api{st: st, auth: auth}
+	a := &api{st: st, auth: auth, now: time.Now}
 	mux := http.NewServeMux()
 	mux.HandleFunc("PUT /api/docs/{collection}/{family}", a.secure(true, a.saveDoc))
 	mux.HandleFunc("GET /api/docs", a.secure(true, a.listDocs))
@@ -372,7 +373,7 @@ func (a *api) listHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"hosts":             hosts,
 		"latest_release_id": latest,
-		"now":               time.Now().UTC().Format(time.RFC3339),
+		"now":               a.now().UTC().Format(time.RFC3339),
 	})
 }
 
