@@ -952,7 +952,9 @@ func TestListHostsResponseShape(t *testing.T) {
 	// parallel, so swapping the process-global is safe.
 	origLocal := time.Local
 	time.Local = time.FixedZone("UTC-5", -5*3600)
-	defer func() { time.Local = origLocal }()
+	// Register this before the fixture so LIFO cleanup closes the HTTP
+	// server before restoring the process-global timezone.
+	t.Cleanup(func() { time.Local = origLocal })
 
 	// Empty-store assertions need a fixture WITHOUT a seeded release,
 	// otherwise latest_release_id is the seeded id, not 0.
