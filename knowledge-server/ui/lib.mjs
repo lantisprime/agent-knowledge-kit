@@ -248,6 +248,47 @@ export function parseTriggers(raw) {
   return out;
 }
 
+// parseLinksJSON validates the editor's JSON-array representation before a
+// save is sent. The server repeats the same semantic checks and remains the
+// trust boundary; this function exists to give the operator immediate,
+// fail-closed feedback instead of sending malformed metadata.
+export function parseLinksJSON(raw) {
+  if (!raw || raw.trim() === "") return { links: [], error: "" };
+  let links;
+  try {
+    links = JSON.parse(raw);
+  } catch (_err) {
+    return { links: null, error: "Links must be valid JSON." };
+  }
+  if (!Array.isArray(links)) {
+    return { links: null, error: "Links must be a JSON array." };
+  }
+  for (let i = 0; i < links.length; i++) {
+    const link = links[i];
+    if (!link || typeof link !== "object" || Array.isArray(link)) {
+      return { links: null, error: `Link ${i + 1} must be an object.` };
+    }
+    if (link.relation !== "reference" && link.relation !== "supersedes") {
+      return { links: null, error: `Link ${i + 1} relation must be reference or supersedes.` };
+    }
+    if (typeof link.collection !== "string" || link.collection === "") {
+      return { links: null, error: `Link ${i + 1} collection is required.` };
+    }
+    if (typeof link.family_id !== "string" || link.family_id === "") {
+      return { links: null, error: `Link ${i + 1} family_id is required.` };
+    }
+    if (!Number.isSafeInteger(link.version) || link.version <= 0) {
+      return { links: null, error: `Link ${i + 1} version must be a positive integer.` };
+    }
+  }
+  return { links, error: "" };
+}
+
+export function formatLinksJSON(links) {
+  if (!Array.isArray(links) || links.length === 0) return "";
+  return JSON.stringify(links, null, 2);
+}
+
 // expectedContentHashPattern is exported so app.js (and tests) can
 // validate locally before sending.
 export function isExpectedContentHashShape(s) {
@@ -280,13 +321,14 @@ export function onConflict(state) {
 
 // toFormFields converts a server Doc (or null) into the plain-string
 // shape the merge form uses. The order matches the form's row order;
-// the merge form's 7 input fields are filled positionally. triggers
-// becomes ", "-joined; null/undefined fields become "". Nullish
+// the merge form's 8 input fields are filled positionally. triggers
+// becomes ", "-joined and links becomes pretty JSON; null/undefined fields
+// become "". Nullish
 // docLike returns the all-empty shape with status "draft" (a fresh
 // family has no rows to populate from).
 export function toFormFields(docLike) {
   if (!docLike) {
-    return { title: "", status: "draft", tier: "", owner: "", audience: "", triggers: "", body: "" };
+    return { title: "", status: "draft", tier: "", owner: "", audience: "", triggers: "", links: "", body: "" };
   }
   return {
     title: docLike.title == null ? "" : String(docLike.title),
@@ -295,23 +337,24 @@ export function toFormFields(docLike) {
     owner: docLike.owner == null ? "" : String(docLike.owner),
     audience: docLike.audience == null ? "" : String(docLike.audience),
     triggers: Array.isArray(docLike.triggers) ? docLike.triggers.join(", ") : "",
+    links: formatLinksJSON(docLike.links),
     body: docLike.body == null ? "" : String(docLike.body),
   };
 }
 
 // metaDiffRows compares the metadata fields of two doc-like values
-// over EXACTLY these 6 fields, in this order: title, status, tier,
-// owner, audience, triggers. (body is diffed separately, never
+// over EXACTLY these 7 fields, in this order: title, status, tier,
+// owner, audience, triggers, links. (body is diffed separately, never
 // here.) triggers is compared/displayed in the ", "-joined string
-// form, so a server [a,b] and form "a, b" line up. Each row is
+// form and links in stable pretty JSON. Each row is
 // {field, a, b, same}. Both inputs are passed through toFormFields
 // so null and missing fields are normalized to "". The order is
 // pinned — the UI renders rows into a table tbody in sequence and
-// the unit test asserts the exact 6 names in this order.
+// the unit test asserts the exact 7 names in this order.
 export function metaDiffRows(attempted, current) {
   const a = toFormFields(attempted);
   const b = toFormFields(current);
-  const fields = ["title", "status", "tier", "owner", "audience", "triggers"];
+  const fields = ["title", "status", "tier", "owner", "audience", "triggers", "links"];
   return fields.map((f) => ({
     field: f,
     a: a[f],

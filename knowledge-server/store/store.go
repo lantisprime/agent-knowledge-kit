@@ -66,6 +66,17 @@ CREATE TABLE IF NOT EXISTS doc_versions (
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_family
   ON doc_versions (collection, family_id) WHERE status = 'active';
 
+CREATE TABLE IF NOT EXISTS doc_links (
+  doc_version_id   INTEGER NOT NULL REFERENCES doc_versions(id),
+  position         INTEGER NOT NULL CHECK (position >= 0),
+  relation         TEXT NOT NULL CHECK (relation IN ('reference','supersedes')),
+  target_collection TEXT NOT NULL,
+  target_family_id  TEXT NOT NULL,
+  target_version    INTEGER NOT NULL CHECK (target_version > 0),
+  PRIMARY KEY (doc_version_id, position),
+  UNIQUE (doc_version_id, relation, target_collection, target_family_id, target_version)
+);
+
 CREATE TABLE IF NOT EXISTS releases (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   content_hash TEXT NOT NULL,
@@ -134,15 +145,27 @@ type Store struct {
 }
 
 type DocSave struct {
-	Title       string   `json:"title"`
-	Status      string   `json:"status"`
-	Tier        string   `json:"tier"`
-	Triggers    []string `json:"triggers"`
-	Owner       string   `json:"owner"`
-	Audience    string   `json:"audience"`
-	Body        string   `json:"body"`
-	Editor      string   `json:"-"`
-	BaseVersion *int     `json:"base_version,omitempty"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	Tier        string    `json:"tier"`
+	Triggers    []string  `json:"triggers"`
+	Owner       string    `json:"owner"`
+	Audience    string    `json:"audience"`
+	Body        string    `json:"body"`
+	Links       []DocLink `json:"links"`
+	Editor      string    `json:"-"`
+	BaseVersion *int      `json:"base_version,omitempty"`
+}
+
+// DocLink is one immutable, version-specific relationship owned by a
+// document version. Targets deliberately have no database foreign key:
+// drafts may carry forward references, while release linting is the policy
+// gate that requires an active reference or an existing superseded target.
+type DocLink struct {
+	Relation   string `json:"relation"`
+	Collection string `json:"collection"`
+	FamilyID   string `json:"family_id"`
+	Version    int    `json:"version"`
 }
 
 type DocVersion struct {
@@ -188,10 +211,11 @@ type DocMeta struct {
 // repetition; consumers that only need metadata can read DocMeta.
 type Doc struct {
 	DocMeta
-	Owner    string   `json:"owner"`
-	Audience string   `json:"audience"`
-	Triggers []string `json:"triggers"`
-	Body     string   `json:"body"`
+	Owner    string    `json:"owner"`
+	Audience string    `json:"audience"`
+	Triggers []string  `json:"triggers"`
+	Body     string    `json:"body"`
+	Links    []DocLink `json:"links"`
 }
 
 // ConflictMeta is the list-view row: per the brief, no attempted
@@ -321,6 +345,26 @@ func validateDocSave(in DocSave) error {
 			return fmt.Errorf("%w: trigger %q contains ','", ErrInvalid, t)
 		}
 	}
+	seenLinks := make(map[string]struct{}, len(in.Links))
+	for i, link := range in.Links {
+		if link.Relation != "reference" && link.Relation != "supersedes" {
+			return fmt.Errorf("%w: link %d relation must be reference or supersedes", ErrInvalid, i)
+		}
+		if err := validateIdent("link collection", link.Collection); err != nil {
+			return err
+		}
+		if err := validateIdent("link family", link.FamilyID); err != nil {
+			return err
+		}
+		if link.Version <= 0 {
+			return fmt.Errorf("%w: link %d version must be positive", ErrInvalid, i)
+		}
+		key := fmt.Sprintf("%s\x00%s\x00%s\x00%d", link.Relation, link.Collection, link.FamilyID, link.Version)
+		if _, ok := seenLinks[key]; ok {
+			return fmt.Errorf("%w: duplicate link at position %d", ErrInvalid, i)
+		}
+		seenLinks[key] = struct{}{}
+	}
 	return nil
 }
 
@@ -350,6 +394,11 @@ func (s *Store) saveDocTx(tx *sql.Tx, collection, family string, in DocSave) (Do
 			ErrConflict, *in.BaseVersion, current)
 	}
 	next := current + 1
+	for i, link := range in.Links {
+		if link.Collection == collection && link.FamilyID == family && link.Version == next {
+			return DocVersion{}, fmt.Errorf("%w: link %d targets the saved version itself", ErrInvalid, i)
+		}
+	}
 
 	if in.Status == "active" {
 		if _, err := tx.Exec(`UPDATE doc_versions SET status = 'superseded'
@@ -358,12 +407,25 @@ func (s *Store) saveDocTx(tx *sql.Tx, collection, family string, in DocSave) (Do
 		}
 	}
 	created := now()
-	if _, err := tx.Exec(`INSERT INTO doc_versions
+	res, err := tx.Exec(`INSERT INTO doc_versions
 		(collection, family_id, version, title, status, owner, audience, tier, triggers, body, editor, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		collection, family, next, in.Title, in.Status, in.Owner, in.Audience,
-		in.Tier, strings.Join(in.Triggers, ","), in.Body, in.Editor, created); err != nil {
+		in.Tier, strings.Join(in.Triggers, ","), in.Body, in.Editor, created)
+	if err != nil {
 		return DocVersion{}, err
+	}
+	docVersionID, err := res.LastInsertId()
+	if err != nil {
+		return DocVersion{}, err
+	}
+	for position, link := range in.Links {
+		if _, err := tx.Exec(`INSERT INTO doc_links
+			(doc_version_id, position, relation, target_collection, target_family_id, target_version)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			docVersionID, position, link.Relation, link.Collection, link.FamilyID, link.Version); err != nil {
+			return DocVersion{}, err
+		}
 	}
 	return DocVersion{
 		Collection: collection, FamilyID: family, Version: next,
@@ -490,15 +552,16 @@ func (s *Store) upsertEditConflictTx(tx *sql.Tx, collection, family string, in D
 // doc_versions row id (used to FK into release_docs); body is needed
 // for the per-doc and content hashes.
 type relDoc struct {
-	id      int64
-	path    string
-	version int
-	family  string
-	body    string
+	id         int64
+	collection string
+	path       string
+	version    int
+	family     string
+	body       string
 }
 
 // lintError is the typed wrapper that releaseCandidate returns for
-// a doc-scoped kernel lint. It unwraps to ErrLint (so the existing
+// a doc-scoped kernel or document-link lint. It unwraps to ErrLint (so the existing
 // errors.Is(err, ErrLint) → 409 mapping keeps working in the API
 // layer), and carries the offending (collection, family, version,
 // reason) so CutRelease can auto-record a policy conflict. The
@@ -517,9 +580,9 @@ func (e *lintError) Unwrap() error { return ErrLint }
 // releaseCandidate computes the would-be release manifest inside the
 // caller's transaction. It returns the manifest with ReleaseID == 0
 // (the caller assigns the inserted row's id) and the per-doc rows
-// needed to populate release_docs. Kernel lint (byte + word cap) and
-// the empty-release lint run here; both surface as ErrLint and the
-// caller rolls back.
+// needed to populate release_docs. Kernel lints (byte + word cap), document-
+// link lints, and the empty-release lint run here; all surface as ErrLint and
+// the caller rolls back.
 //
 // Transaction ownership is part of the contract: the store pool is
 // pinned to ONE connection (SetMaxOpenConns(1)), so this helper must
@@ -538,24 +601,23 @@ func (s *Store) releaseCandidate(tx *sql.Tx) (Manifest, []relDoc, error) {
 	var docs []relDoc
 	for rows.Next() {
 		var d relDoc
-		var collection string
-		if err := rows.Scan(&d.id, &collection, &d.family, &d.version, &d.body); err != nil {
+		if err := rows.Scan(&d.id, &d.collection, &d.family, &d.version, &d.body); err != nil {
 			rows.Close()
 			return Manifest{}, nil, err
 		}
-		d.path = collection + "/" + d.family + ".md"
-		if collection == "kernel" {
+		d.path = d.collection + "/" + d.family + ".md"
+		if d.collection == "kernel" {
 			if len(d.body) > KernelByteCap {
 				rows.Close()
 				return Manifest{}, nil, &lintError{
-					Collection: collection, Family: d.family, Version: d.version,
+					Collection: d.collection, Family: d.family, Version: d.version,
 					Reason: fmt.Sprintf("kernel %q exceeds %d-byte cap", d.family, KernelByteCap),
 				}
 			}
 			if len(strings.Fields(d.body)) > KernelWordCap {
 				rows.Close()
 				return Manifest{}, nil, &lintError{
-					Collection: collection, Family: d.family, Version: d.version,
+					Collection: d.collection, Family: d.family, Version: d.version,
 					Reason: fmt.Sprintf("kernel %q exceeds %d-word cap", d.family, KernelWordCap),
 				}
 			}
@@ -565,6 +627,11 @@ func (s *Store) releaseCandidate(tx *sql.Tx) (Manifest, []relDoc, error) {
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return Manifest{}, nil, err
+	}
+	for _, d := range docs {
+		if err := lintDocLinksTx(tx, d); err != nil {
+			return Manifest{}, nil, err
+		}
 	}
 	if len(docs) == 0 {
 		// Empty-release lint carries no doc: it MUST NOT carry a
@@ -589,6 +656,62 @@ func (s *Store) releaseCandidate(tx *sql.Tx) (Manifest, []relDoc, error) {
 	return manifest, docs, nil
 }
 
+// lintDocLinksTx enforces link policy for one active release candidate doc.
+// Link targets are looked up only after the candidate query is closed so the
+// single transaction connection never has nested live result sets.
+func lintDocLinksTx(tx *sql.Tx, source relDoc) error {
+	rows, err := tx.Query(`SELECT l.relation, l.target_collection, l.target_family_id,
+		l.target_version, COALESCE(t.status, ''), COALESCE(c.in_release, 0)
+		FROM doc_links l
+		LEFT JOIN doc_versions t
+		  ON t.collection = l.target_collection
+		 AND t.family_id = l.target_family_id
+		 AND t.version = l.target_version
+		LEFT JOIN collections c ON c.name = l.target_collection
+		WHERE l.doc_version_id = ?
+		ORDER BY l.position`, source.id)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var link DocLink
+		var status string
+		var inRelease int
+		if err := rows.Scan(&link.Relation, &link.Collection, &link.FamilyID,
+			&link.Version, &status, &inRelease); err != nil {
+			return err
+		}
+		target := fmt.Sprintf("%s/%s version %d", link.Collection, link.FamilyID, link.Version)
+		reason := ""
+		switch link.Relation {
+		case "reference":
+			switch {
+			case status == "":
+				reason = fmt.Sprintf("reference target %s does not exist", target)
+			case status != "active":
+				reason = fmt.Sprintf("reference target %s is %s; target must be active in the release", target, status)
+			case inRelease != 1:
+				reason = fmt.Sprintf("reference target %s is not release-bearing", target)
+			}
+		case "supersedes":
+			switch {
+			case status == "":
+				reason = fmt.Sprintf("supersedes target %s does not exist", target)
+			case status != "superseded":
+				reason = fmt.Sprintf("supersedes target %s is %s; target must be superseded", target, status)
+			}
+		}
+		if reason != "" {
+			return &lintError{
+				Collection: source.collection, Family: source.family, Version: source.version,
+				Reason: fmt.Sprintf("document %s/%s: %s", source.collection, source.family, reason),
+			}
+		}
+	}
+	return rows.Err()
+}
+
 // PreviewRelease computes the would-be release manifest inside a
 // transaction that is rolled back before return — PreviewRelease
 // never inserts. The returned Manifest has ReleaseID == 0 to make
@@ -609,7 +732,7 @@ func (s *Store) PreviewRelease() (Manifest, error) {
 // it exactly; a mismatch returns ErrConflict and cuts nothing. Pass
 // "" to opt out (the unconditional legacy behavior).
 //
-// A doc-scoped kernel lint (byte or word cap) auto-opens a policy
+// A doc-scoped kernel or document-link lint auto-opens a policy
 // conflict for the offending (collection, family). releaseCandidate
 // rejects BEFORE any write, so the open tx holds only reads and the
 // row is recorded in the SAME tx and committed — no second Begin (a
@@ -838,24 +961,25 @@ func (s *Store) GetDoc(collection, family string, version int) (Doc, error) {
 		return Doc{}, err
 	}
 	var (
-		row  *sql.Row
-		doc  Doc
-		trig string
+		row   *sql.Row
+		doc   Doc
+		docID int64
+		trig  string
 	)
 	if version <= 0 {
-		row = s.db.QueryRow(`SELECT collection, family_id, version, title, status,
+		row = s.db.QueryRow(`SELECT id, collection, family_id, version, title, status,
 			owner, audience, tier, triggers, body, editor, created_at
 			FROM doc_versions
 			WHERE collection = ? AND family_id = ?
 			ORDER BY version DESC LIMIT 1`, collection, family)
 	} else {
-		row = s.db.QueryRow(`SELECT collection, family_id, version, title, status,
+		row = s.db.QueryRow(`SELECT id, collection, family_id, version, title, status,
 			owner, audience, tier, triggers, body, editor, created_at
 			FROM doc_versions
 			WHERE collection = ? AND family_id = ? AND version = ?`,
 			collection, family, version)
 	}
-	err := row.Scan(&doc.Collection, &doc.FamilyID, &doc.Version, &doc.Title,
+	err := row.Scan(&docID, &doc.Collection, &doc.FamilyID, &doc.Version, &doc.Title,
 		&doc.Status, &doc.Owner, &doc.Audience, &doc.Tier, &trig, &doc.Body,
 		&doc.Editor, &doc.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -867,6 +991,23 @@ func (s *Store) GetDoc(collection, family string, version int) (Doc, error) {
 	doc.Triggers = []string{}
 	if trig != "" {
 		doc.Triggers = strings.Split(trig, ",")
+	}
+	doc.Links = []DocLink{}
+	rows, err := s.db.Query(`SELECT relation, target_collection, target_family_id, target_version
+		FROM doc_links WHERE doc_version_id = ? ORDER BY position`, docID)
+	if err != nil {
+		return Doc{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var link DocLink
+		if err := rows.Scan(&link.Relation, &link.Collection, &link.FamilyID, &link.Version); err != nil {
+			return Doc{}, err
+		}
+		doc.Links = append(doc.Links, link)
+	}
+	if err := rows.Err(); err != nil {
+		return Doc{}, err
 	}
 	return doc, nil
 }

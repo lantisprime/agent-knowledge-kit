@@ -1,9 +1,11 @@
 # Knowledge-server architecture
 
-Status: **implemented v1** (steps 1–7, cut over 2026-08-08).
+Status: **implemented v1 plus approved document-link lint slice** (v1 steps
+1–7 cut over 2026-08-08; link slice approved 2026-08-08).
 
-The accepted detailed contract is `docs/plans/knowledge-server.md`. This file
-records the current architecture and separates it from post-v1 targets. The
+The accepted v1 contract is `docs/plans/knowledge-server.md`; the approved
+link-slice contract is `docs/plans/document-link-lints.md`. This file records
+the current architecture and separates it from post-v1 targets. The
 earlier Git transport, event-propagation design, and two-principal publication
 boundary are superseded; their historical contract remains in
 `docs/plans/delivery-trust-boundary.md` and Git history only.
@@ -72,12 +74,14 @@ The v1 SQLite store seeds two release-bearing collections:
 
 Every save inserts an immutable document version. A database index allows one
 active version per collection/family. Draft and superseded versions remain in
-history but do not enter releases.
+history but do not enter releases. Ordered `reference` and `supersedes` links
+belong to the immutable source version and target an exact collection, family,
+and version.
 
 A release cut:
 
 1. selects active documents from release-bearing collections;
-2. applies the 2,000-word and 24-KiB kernel lints;
+2. applies the 2,000-word and 24-KiB kernel lints plus document-link lints;
 3. computes a deterministic manifest and content hash;
 4. checks the optional preview-hash precondition;
 5. writes the immutable release and its document membership in one
@@ -93,8 +97,9 @@ The HTTP API is the only store write door. The embedded UI is an ordinary API
 client with no direct database access. It provides:
 
 - document browse, edit, immutable history, and bounded diffs;
+- JSON editing and merge comparison for version-specific document links;
 - preview-and-confirm publishing with an expected-content-hash guard;
-- edit, claim, and kernel-policy conflict records with resolution audit;
+- edit, claim, and policy conflict records with resolution audit;
 - fleet current/stale/dark classification and force-resync actions.
 
 Operator endpoints cover document writes/reads, release cuts, host-token
@@ -161,9 +166,10 @@ processes.
 - Stale optimistic-lock saves open or increment an edit conflict.
 - Operators may flag claim conflicts manually. Automated claim detection is
   post-v1.
-- Kernel-cap lint failures open policy conflicts; a successful cut resolves
-  open kernel-policy conflicts. Draft-reference and dangling-supersession
-  lints require a future document-link schema.
+- Kernel-cap and document-link lint failures open policy conflicts against the
+  offending source document; a successful cut resolves open policy conflicts.
+  Active references must resolve to the exact active target in the release,
+  and supersession targets must exist with `superseded` status.
 - Host rows are the union of heartbeats, pending resyncs, and issued tokens.
   The server supplies `now` so the UI does not trust the browser clock for age.
 - Delivery is at-least-once and apply is idempotent. A resync flag survives an
@@ -205,18 +211,19 @@ supersession applies only to private knowledge storage and delivery.
   layouts, and subscriber-materialized corpus cutover.
 - `go test -race ./...` under `knowledge-server/`: store, API, authentication,
   UI handlers, and subscriber convergence/security regressions.
-- `node --test ui/lib_test.mjs`: deterministic UI parsing, diffs, publish,
-  conflict, and fleet helpers.
+- `node --test ui/lib_test.mjs`: deterministic UI parsing (including link
+  JSON), diffs, publish, conflict, and fleet helpers.
 
 Fresh-session injection and production TLS/service deployment remain
 consumer-environment checks.
 
 ## Post-v1 work
 
-No post-v1 order is accepted yet. Candidate slices are:
+The document-link schema plus draft-reference/dangling-supersession lints are
+the first approved post-v1 slice; `docs/plans/document-link-lints.md` is its
+contract. Remaining candidate slices are unordered:
 
 - automated claim-conflict detection;
-- document-link schema plus draft-reference/dangling-supersession lints;
 - additional collections, machine-submitted streams, and provenance;
 - an optional SSE release doorbell while retaining polling convergence;
 - kit/schema versioning and authenticated binary release distribution;

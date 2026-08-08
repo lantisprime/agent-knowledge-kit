@@ -124,11 +124,20 @@ best-effort heartbeat.
 
 - Every save creates an immutable version; one active version is allowed per
   collection/family.
+- Saves may carry ordered, version-specific `reference` and `supersedes`
+  links. The editor exposes them as a JSON array and document reads return
+  them with the selected immutable version. The exact wire contract is in
+  `docs/plans/document-link-lints.md`.
 - Draft versions never enter a release.
 - Publish preview and cut use the same candidate computation. The UI submits
-  the preview hash as a cut precondition to detect intervening edits.
+  the preview hash as a cut precondition to detect intervening corpus-byte
+  changes; cut recomputes link lints transactionally even when only metadata
+  changed.
 - Stale optimistic-lock saves open edit-conflict records. Claim conflicts can
-  be flagged manually. Kernel-cap failures open policy conflicts.
+  be flagged manually. Kernel-cap, invalid active-reference, and invalid
+  supersession failures open policy conflicts. Active references must resolve
+  to an exact active version in the release; supersession targets must exist
+  and already be superseded.
 - Force-resync causes a host to re-fetch, verify, and install a fresh directory
   even when its release id already matches.
 

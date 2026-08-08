@@ -8,21 +8,31 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>knowledge-server</h1>
-    <nav>
-      <button id="nav-browse" type="button">Browse</button>
-      <button id="nav-publish" type="button">Publish</button>
-      <button id="nav-conflicts" type="button">Conflicts</button>
-      <button id="nav-fleet" type="button">Fleet</button>
-      <span class="spacer"></span>
-      <span id="who" class="who"></span>
-      <button id="logout" type="button" hidden>Logout</button>
-    </nav>
+    <div class="topbar-inner">
+      <div class="brand" aria-label="Knowledge Console">
+        <span class="brand-mark" aria-hidden="true">K</span>
+        <span class="brand-copy">
+          <strong>Knowledge</strong>
+          <small>Operations Console</small>
+        </span>
+      </div>
+      <nav aria-label="Primary navigation">
+        <button id="nav-browse" type="button">Documents</button>
+        <button id="nav-publish" type="button">Releases</button>
+        <button id="nav-conflicts" type="button">Conflicts</button>
+        <button id="nav-fleet" type="button">Fleet</button>
+        <span class="spacer"></span>
+        <span id="who" class="who"></span>
+        <button id="logout" type="button" class="quiet-button" hidden>Sign out</button>
+      </nav>
+    </div>
   </header>
 
   <main id="view-root">
     <section id="view-login" class="view" hidden>
+      <p class="eyebrow">Operator access</p>
       <h2>Sign in</h2>
+      <p class="view-lead">Curate, validate, and release durable knowledge from one secure workspace.</p>
       <p id="login-msg" class="muted"></p>
       <label>Operator token
         <input id="login-token" type="password" autocomplete="off" spellcheck="false">
@@ -35,8 +45,15 @@
     </section>
 
     <section id="view-browse" class="view" hidden>
+      <div class="view-heading">
+        <div>
+          <p class="eyebrow">Library</p>
+          <h2>Documents</h2>
+          <p class="view-lead">Browse active knowledge and immutable document history.</p>
+        </div>
+      </div>
       <div class="browse-bar">
-        <button id="browse-new" type="button">New doc</button>
+        <button id="browse-new" type="button" class="primary">New document</button>
         <label>Collection
           <select id="filter-collection"><option value="">(any)</option></select>
         </label>
@@ -66,6 +83,7 @@
     </section>
 
     <section id="view-newdoc" class="view" hidden>
+      <p class="eyebrow">Library</p>
       <h2>New doc</h2>
       <label>Collection
         <select id="newdoc-collection">
@@ -77,13 +95,14 @@
         <input id="newdoc-family" type="text" autocomplete="off" spellcheck="false">
       </label>
       <div class="row">
-        <button id="newdoc-go" type="button">Open editor</button>
+        <button id="newdoc-go" type="button" class="primary">Open editor</button>
         <button id="newdoc-cancel" type="button">Cancel</button>
       </div>
       <p id="newdoc-error" class="error"></p>
     </section>
 
     <section id="view-editor" class="view" hidden>
+      <p class="eyebrow">Workspace</p>
       <h2>Editor</h2>
       <p id="editor-path" class="muted"></p>
       <div class="row">
@@ -105,6 +124,9 @@
       <label>Triggers (comma-separated)
         <input id="ed-triggers" type="text" autocomplete="off" spellcheck="false">
       </label>
+      <label>Links (JSON array)
+        <textarea id="ed-links" rows="6" spellcheck="false" placeholder='[{"relation":"reference","collection":"docs","family_id":"runbook","version":1}]'></textarea>
+      </label>
       <label>Body
         <textarea id="ed-body" rows="20" spellcheck="false"></textarea>
       </label>
@@ -114,7 +136,7 @@
         <span class="muted">(advisory \u2014 server enforces at release cut)</span>
       </div>
       <div class="row">
-        <button id="editor-save" type="button">Save</button>
+        <button id="editor-save" type="button" class="primary">Save document</button>
         <button id="editor-merge" type="button" hidden>Open merge view</button>
         <span id="editor-save-state" class="muted"></span>
       </div>
@@ -122,6 +144,7 @@
     </section>
 
     <section id="view-history" class="view" hidden>
+      <p class="eyebrow">Versions</p>
       <h2>History</h2>
       <p id="history-path" class="muted"></p>
       <ul id="history-list"></ul>
@@ -134,7 +157,9 @@
     </section>
 
     <section id="view-publish" class="view" hidden>
-      <h2>Publish</h2>
+      <p class="eyebrow">Distribution</p>
+      <h2>Releases</h2>
+      <p class="view-lead">Preview the exact manifest and validate policy before publishing.</p>
       <div class="row publish-row">
         <button id="publish-refresh" type="button">Refresh</button>
       </div>
@@ -153,8 +178,8 @@
         <div id="publish-content-diff"></div>
       </div>
       <div class="row">
-        <button id="publish-cut" type="button" disabled>Cut release</button>
-        <button id="publish-confirm" type="button" hidden>Confirm cut</button>
+        <button id="publish-cut" type="button" class="primary" disabled>Cut release</button>
+        <button id="publish-confirm" type="button" class="primary" hidden>Confirm cut</button>
         <button id="publish-cancel" type="button" hidden>Cancel</button>
         <span id="publish-state" class="muted"></span>
       </div>
@@ -162,7 +187,9 @@
     </section>
 
     <section id="view-conflicts" class="view" hidden>
+      <p class="eyebrow">Governance</p>
       <h2>Conflicts</h2>
+      <p class="view-lead">Review edit, claim, and policy conflicts before resolution.</p>
       <label><input id="conflicts-show-resolved" type="checkbox"> show resolved</label>
       <table id="conflicts-table">
         <thead>
@@ -192,12 +219,13 @@
         <input id="cf-detail" type="text" autocomplete="off" spellcheck="false">
       </label>
       <div class="row">
-        <button id="cf-go" type="button">Flag claim conflict</button>
+        <button id="cf-go" type="button" class="primary">Flag claim conflict</button>
       </div>
       <p id="cf-error" class="error"></p>
     </section>
 
     <section id="view-conflict" class="view" hidden>
+      <p class="eyebrow">Governance</p>
       <h2>Conflict</h2>
       <p id="conflict-title" class="muted"></p>
       <h3>Record</h3>
@@ -229,6 +257,9 @@
         <label>Triggers (comma-separated)
           <input id="mg-triggers" type="text" autocomplete="off" spellcheck="false">
         </label>
+        <label>Links (JSON array)
+          <textarea id="mg-links" rows="6" spellcheck="false"></textarea>
+        </label>
         <label>Body
           <textarea id="mg-body" rows="20" spellcheck="false"></textarea>
         </label>
@@ -242,8 +273,8 @@
         <input id="conflict-resolution" type="text" autocomplete="off" spellcheck="false">
       </label>
       <div class="row">
-        <button id="conflict-resolve-save" type="button" hidden disabled>Save merged &amp; resolve</button>
-        <button id="conflict-resolve-keep" type="button" disabled>Resolve</button>
+        <button id="conflict-resolve-save" type="button" class="primary" hidden disabled>Save merged &amp; resolve</button>
+        <button id="conflict-resolve-keep" type="button" class="primary" disabled>Resolve</button>
         <button id="conflict-back" type="button">Back to conflicts</button>
         <span id="conflict-state" class="muted"></span>
       </div>
@@ -251,7 +282,9 @@
     </section>
 
     <section id="view-fleet" class="view" hidden>
+      <p class="eyebrow">Delivery</p>
       <h2>Fleet</h2>
+      <p class="view-lead">Monitor release convergence and request verified resynchronization.</p>
       <div class="row">
         <button id="fleet-refresh" type="button">Refresh</button>
         <span id="fleet-summary" class="muted"></span>

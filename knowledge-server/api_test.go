@@ -131,6 +131,62 @@ func TestGetDocUnknownFamily(t *testing.T) {
 	}
 }
 
+func TestDocumentLinksOverHTTP(t *testing.T) {
+	f := newAuthedFixtureWith(t, "operator-secret-token-aaaaaaaaaaaaaaaaa", false)
+	if _, err := f.s.SaveDoc("docs", "target", store.DocSave{Status: "draft", Body: "draft"}); err != nil {
+		t.Fatal(err)
+	}
+	links := []store.DocLink{{
+		Relation: "reference", Collection: "docs", FamilyID: "target", Version: 1,
+	}}
+	r, body := f.do(t, http.MethodPut, "/api/docs/docs/source", f.opsToken(), map[string]any{
+		"title": "source", "status": "active", "body": "source", "links": links,
+	})
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("save: status=%d body=%s", r.StatusCode, body)
+	}
+	r, body = f.do(t, http.MethodGet, "/api/docs/docs/source", f.opsToken(), nil)
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("get: status=%d body=%s", r.StatusCode, body)
+	}
+	var got store.Doc
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Links, links) {
+		t.Fatalf("links: got %#v, want %#v", got.Links, links)
+	}
+
+	// Preview blocks but remains read-only.
+	r, body = f.do(t, http.MethodGet, "/api/releases/preview", f.opsToken(), nil)
+	if r.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte(`"error":"lint"`)) ||
+		!bytes.Contains(body, []byte("draft")) {
+		t.Fatalf("preview: status=%d body=%s", r.StatusCode, body)
+	}
+	conflicts, err := f.s.ListConflicts("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("preview must not record conflicts: %+v", conflicts)
+	}
+
+	// Cut uses the same lint and records the source policy conflict.
+	r, body = f.do(t, http.MethodPost, "/api/releases", f.opsToken(), nil)
+	if r.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte(`"error":"lint"`)) {
+		t.Fatalf("cut: status=%d body=%s", r.StatusCode, body)
+	}
+	var env struct {
+		ConflictID *int64 `json:"conflict_id"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.ConflictID == nil {
+		t.Fatalf("cut lint must carry conflict_id: %s", body)
+	}
+}
+
 // TestDocHistoryNewestFirst — ordering and shape.
 func TestDocHistoryNewestFirst(t *testing.T) {
 	f := newAuthedFixture(t)

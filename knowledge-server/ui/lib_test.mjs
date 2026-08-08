@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 
 import {
   DIFF_MAX_LINES, DIFF_MAX_BYTES, DIFF_MAX_PRODUCT,
-  encodePath, countWords, countBytes, parseTriggers,
+  encodePath, countWords, countBytes, parseTriggers, parseLinksJSON, formatLinksJSON,
   isExpectedContentHashShape, initialSaveState, afterSave, onConflict,
   lineDiff, manifestDiff,
   conflictsPath, conflictPath, resolveConflictPath,
@@ -76,6 +76,39 @@ test("parseTriggers splits, trims, drops empties", () => {
   assert.deepEqual(parseTriggers("a"), ["a"]);
   assert.deepEqual(parseTriggers("a,b,c"), ["a", "b", "c"]);
   assert.deepEqual(parseTriggers(" a , b ,  "), ["a", "b"]);
+});
+
+// ---------- document links ----------
+
+test("parseLinksJSON accepts empty and exact link objects", () => {
+  assert.deepEqual(parseLinksJSON(""), { links: [], error: "" });
+  const links = [
+    { relation: "reference", collection: "docs", family_id: "runbook", version: 3 },
+    { relation: "supersedes", collection: "docs", family_id: "old", version: 1 },
+  ];
+  assert.deepEqual(parseLinksJSON(JSON.stringify(links)), { links, error: "" });
+});
+
+test("parseLinksJSON rejects malformed shapes before save", () => {
+  for (const raw of [
+    "{",
+    `{}`,
+    `[{"relation":"mentions","collection":"docs","family_id":"x","version":1}]`,
+    `[{"relation":"reference","collection":"","family_id":"x","version":1}]`,
+    `[{"relation":"reference","collection":"docs","family_id":"","version":1}]`,
+    `[{"relation":"reference","collection":"docs","family_id":"x","version":0}]`,
+  ]) {
+    const got = parseLinksJSON(raw);
+    assert.equal(got.links, null, raw);
+    assert.notEqual(got.error, "", raw);
+  }
+});
+
+test("formatLinksJSON emits empty text or stable pretty JSON", () => {
+  assert.equal(formatLinksJSON([]), "");
+  assert.equal(formatLinksJSON(null), "");
+  const links = [{ relation: "reference", collection: "docs", family_id: "x", version: 2 }];
+  assert.equal(formatLinksJSON(links), JSON.stringify(links, null, 2));
 });
 
 // ---------- isExpectedContentHashShape ----------
@@ -328,11 +361,13 @@ test("conflictPath / resolveConflictPath use encodeURIComponent on id", () => {
 test("toFormFields full doc", () => {
   const doc = {
     title: "T", status: "active", tier: "B", owner: "alice",
-    audience: "ops", triggers: ["a", "b"], body: "body",
+    audience: "ops", triggers: ["a", "b"],
+    links: [{ relation: "reference", collection: "docs", family_id: "x", version: 1 }],
+    body: "body",
   };
   assert.deepEqual(toFormFields(doc), {
     title: "T", status: "active", tier: "B", owner: "alice",
-    audience: "ops", triggers: "a, b", body: "body",
+    audience: "ops", triggers: "a, b", links: JSON.stringify(doc.links, null, 2), body: "body",
   });
 });
 
@@ -346,13 +381,14 @@ test("toFormFields nullish fields become empty strings; status defaults to draft
   assert.equal(out.tier, "");
   assert.equal(out.owner, "");
   assert.equal(out.audience, "");
+  assert.equal(out.links, "");
 });
 
 test("toFormFields null docLike → all-empty shape with status draft", () => {
   const out = toFormFields(null);
   assert.deepEqual(out, {
     title: "", status: "draft", tier: "", owner: "", audience: "",
-    triggers: "", body: "",
+    triggers: "", links: "", body: "",
   });
   // undefined is the same shape.
   assert.deepEqual(toFormFields(undefined), out);
@@ -370,19 +406,22 @@ test("toFormFields triggers array joins with ', '", () => {
 test("metaDiffRows identical → all same:true", () => {
   const a = { title: "T", status: "active", tier: "B", owner: "x", audience: "ops", triggers: ["a", "b"], body: "ignored" };
   const rows = metaDiffRows(a, { ...a });
-  assert.equal(rows.length, 6);
+  assert.equal(rows.length, 7);
   for (const r of rows) {
     assert.equal(r.same, true, `field ${r.field}`);
     assert.equal(r.a, r.b, `field ${r.field}`);
   }
 });
 
-test("metaDiffRows EXACT field order and differing title/triggers flagged", () => {
+test("metaDiffRows EXACT field order and differing title/triggers/links flagged", () => {
   const a = { title: "old", status: "active", tier: "B", owner: "alice", audience: "ops", triggers: ["a", "b"], body: "x" };
-  const b = { title: "new", status: "draft", tier: "B", owner: "alice", audience: "ops", triggers: ["a", "c"], body: "y" };
+  const b = {
+    title: "new", status: "draft", tier: "B", owner: "alice", audience: "ops",
+    triggers: ["a", "c"], links: [{ relation: "reference", collection: "docs", family_id: "x", version: 1 }], body: "y",
+  };
   const rows = metaDiffRows(a, b);
-  // Pinned order: title, status, tier, owner, audience, triggers.
-  assert.deepEqual(rows.map((r) => r.field), ["title", "status", "tier", "owner", "audience", "triggers"]);
+  // Pinned order: title, status, tier, owner, audience, triggers, links.
+  assert.deepEqual(rows.map((r) => r.field), ["title", "status", "tier", "owner", "audience", "triggers", "links"]);
   // title differs.
   assert.deepEqual(rows[0], { field: "title", a: "old", b: "new", same: false });
   // status differs.
@@ -393,11 +432,12 @@ test("metaDiffRows EXACT field order and differing title/triggers flagged", () =
   assert.equal(rows[4].same, true);
   // triggers differ in the ", "-joined form.
   assert.deepEqual(rows[5], { field: "triggers", a: "a, b", b: "a, c", same: false });
+  assert.equal(rows[6].same, false);
 });
 
 test("metaDiffRows attempted=null tolerated: all a=\"\" (except status=draft default)", () => {
   const rows = metaDiffRows(null, { title: "x", status: "active", tier: "B", owner: "y", audience: "ops", triggers: [], body: "z" });
-  assert.equal(rows.length, 6);
+  assert.equal(rows.length, 7);
   // status defaults to "draft" on the attempted side per toFormFields;
   // every other a-value is the empty string.
   for (const r of rows) {

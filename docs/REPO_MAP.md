@@ -5,8 +5,8 @@
 >   entry points without importing consumer-repository assumptions.
 > - **Authority:** navigation aid; `AGENTS.md`, `CLAUDE.md`, the accepted plan,
 >   tests, schema, and implementation remain governing evidence.
-> - **Verified:** 2026-08-08 against the step-7 cutover working tree based on
->   Forgejo `main` at `033d7ff`.
+> - **Verified:** 2026-08-08 against the document-link lint working tree based
+>   on Forgejo `main` at `3953faf`.
 > - **Update trigger:** ownership, architecture, lifecycle, directory roles,
 >   supported adapters, verification entry points, or terminology changes.
 
@@ -20,8 +20,9 @@ corpus pointer.
 
 Knowledge-server build-order steps 1–7 are implemented. The step-7 cutover
 retired Git as a private-corpus transport and removed the two-principal fixture
-publisher. Forgejo remains the sole authority for this kit's source and
-releases.
+publisher. The first approved post-v1 slice adds immutable document links and
+release-policy lints. Forgejo remains the sole authority for this kit's source
+and releases.
 
 ## 2. Authority and dependency direction
 
@@ -29,6 +30,7 @@ releases.
 |---|---|
 | Generic architecture and trust model | `docs/architecture.md` |
 | Detailed v1 contract and API | `docs/plans/knowledge-server.md` |
+| Document-link schema and release lints | `docs/plans/document-link-lints.md` |
 | Agent/contributor contract | `AGENTS.md`, `CLAUDE.md` |
 | Public interface | `README.md` |
 | Store/API/subscriber implementation | `knowledge-server/` |
@@ -52,8 +54,9 @@ A consumer cannot tag, publish, or rewrite the kit.
 | `AGENTS.md` | Repository-wide authority and workflow | Authoritative |
 | `CLAUDE.md` | Implementation constraints, commands, and known risks | Authoritative |
 | `README.md` | User-facing contract and quickstart | Shipped interface |
-| `docs/architecture.md` | Current system and trust decisions | Implemented v1 record |
+| `docs/architecture.md` | Current system and trust decisions | Current implemented record |
 | `docs/plans/knowledge-server.md` | Detailed store/API/subscriber/UI contract | Accepted; steps 1–7 implemented |
+| `docs/plans/document-link-lints.md` | Immutable link schema and post-v1 release lints | Approved post-v1 slice |
 | `docs/plans/delivery-trust-boundary.md` | Previous two-principal design | Superseded historical record |
 | `knowledge-server/main.go` | Server flags, exposure gate, HTTP lifecycle | Implemented |
 | `knowledge-server/api.go` | Only HTTP/API write door and endpoint schemas | Implemented |
@@ -91,15 +94,16 @@ The subscriber uses polling in v1. Server failure retains the last-good corpus;
 bad manifests, archives, hashes, redirects, credentials, or filesystem writes
 never replace it. The fleet page is the fail-loud operator surface.
 
-## 5. Implemented v1
+## 5. Implemented v1 and approved post-v1 slice
 
 - SQLite collections, immutable document versions, one-active-per-family, and
   transactional release cuts.
-- Draft exclusion plus 2,000-word and 24-KiB kernel release lints.
+- Draft exclusion plus kernel-cap and immutable document-link release lints.
 - Deterministic manifest/content hashes and tar archives.
 - Embedded UI for browse/edit/history/diff, guarded publish, conflicts, and
   fleet state.
-- Edit/claim/kernel-policy conflicts and append-only resolution audit.
+- Edit/claim/policy conflicts (including link-policy failures) and append-only
+  resolution audit.
 - Operator and host bearer credentials, token-bound host identity, TLS gate,
   bounded request bodies, and server read/idle timeouts.
 - Subscriber fail-soft convergence, path/tar containment, exact manifest-set
@@ -110,14 +114,14 @@ never replace it. The fleet page is the fail-loud operator surface.
   marker regressions.
 
 Not implemented: Tier B trigger loading, automated claim detection,
-draft-reference/dangling-supersession lints, additional collections,
-machine-submitted streams, SSE notifications, multi-instance HA, Postgres,
-kit/schema compatibility negotiation, or authenticated binary distribution.
+additional collections, machine-submitted streams, SSE notifications,
+multi-instance HA, Postgres, kit/schema compatibility negotiation, or
+authenticated binary distribution.
 
 ## 6. Security boundaries
 
-- API input, archive bytes, manifests, identifiers, paths, redirects, kernel
-  bytes, and adapter targets are untrusted.
+- API input, document links, archive bytes, manifests, identifiers, paths,
+  redirects, kernel bytes, and adapter targets are untrusted.
 - The server database is the only writable knowledge authority.
 - Non-loopback serving requires bearer authentication plus TLS unless the
   explicit dangerous override is used.
@@ -187,6 +191,7 @@ negative cutover regression.
 | knowledge server | Single writable service containing store, API, and UI |
 | collection | Server policy grouping such as `kernel` or `docs` |
 | document version | Immutable saved revision in the server database |
+| document link | Version-specific `reference` or `supersedes` relationship owned by one source version |
 | release | Immutable manifest/archive snapshot of active release-bearing docs |
 | subscriber | Thin host client that verifies and materializes releases |
 | corpus | Subscriber-selected local release exposed at `$KNOWLEDGE_HOME/corpus` |
