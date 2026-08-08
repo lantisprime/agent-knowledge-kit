@@ -102,17 +102,19 @@ for Codex adapter tests. Server and subscriber flags are documented by their
 
 ## Plans and status
 
-`docs/plans/knowledge-server.md` is the accepted detailed contract. Steps 1–7
-are implemented. `docs/architecture.md` is the current decision record.
+`docs/plans/knowledge-server.md` is the accepted v1 contract. Steps 1–7 are
+implemented. The approved post-v1 document-link and release-lint slice is
+recorded in `docs/plans/document-link-lints.md`. `docs/architecture.md` is the
+current decision record.
 `docs/plans/delivery-trust-boundary.md` is retained only as an explicitly
 superseded historical plan; do not implement or cite its two-principal model as
 current architecture.
 
-Post-v1 work is not ordered: automated claim detection, additional
+Remaining post-v1 work is not ordered: automated claim detection, additional
 collections/machine-submitted streams, additive lifecycle/provenance schema,
-and draft-reference/dangling-supersession lints require a newly approved
-slice. Multi-instance HA and Postgres are out of scope. Environment deployment
-and consumer migration remain consumer-repository work.
+SSE notification, and compatibility/authenticated binary releases require a
+newly approved slice. Multi-instance HA and Postgres are out of scope.
+Environment deployment and consumer migration remain consumer-repository work.
 
 ## Conventions
 

@@ -18,7 +18,7 @@
 
 import {
   encodePath, listDocsPath, previewReleasePath, cutReleasePath,
-  currentReleasePath, countWords, countBytes, parseTriggers,
+  currentReleasePath, countWords, countBytes, parseTriggers, parseLinksJSON, formatLinksJSON,
   isExpectedContentHashShape, initialSaveState, afterSave, onConflict,
   lineDiff, manifestDiff,
   conflictsPath, conflictPath, resolveConflictPath,
@@ -334,6 +334,7 @@ async function openEditor(collection, family, saveState) {
     byId("ed-owner").value = "";
     byId("ed-audience").value = "";
     byId("ed-triggers").value = "";
+    byId("ed-links").value = "";
     byId("ed-body").value = "";
     state.current.saveState = { baseVersion: null, exists: false };
     state.current.version = 0;
@@ -346,6 +347,7 @@ async function openEditor(collection, family, saveState) {
     byId("ed-owner").value = d.owner || "";
     byId("ed-audience").value = d.audience || "";
     byId("ed-triggers").value = (d.triggers || []).join(", ");
+    byId("ed-links").value = formatLinksJSON(d.links);
     byId("ed-body").value = d.body || "";
     state.current.saveState = { baseVersion: d.version, exists: true };
     state.current.version = d.version;
@@ -372,6 +374,11 @@ function updateKernelCounters() {
 async function submitEditorSave() {
   if (!state.current) return;
   const c = state.current.collection, f = state.current.family;
+  const parsedLinks = parseLinksJSON(byId("ed-links").value);
+  if (parsedLinks.error) {
+    setText("editor-error", parsedLinks.error);
+    return;
+  }
   const body = {
     title: byId("ed-title").value,
     status: byId("ed-status").value,
@@ -379,6 +386,7 @@ async function submitEditorSave() {
     triggers: parseTriggers(byId("ed-triggers").value),
     owner: byId("ed-owner").value,
     audience: byId("ed-audience").value,
+    links: parsedLinks.links,
     body: byId("ed-body").value,
   };
   if (state.current.saveState.exists) {
@@ -842,6 +850,7 @@ function populateMergeForm(fields) {
   byId("mg-owner").value = fields.owner;
   byId("mg-audience").value = fields.audience;
   byId("mg-triggers").value = fields.triggers;
+  byId("mg-links").value = fields.links;
   byId("mg-body").value = fields.body;
 }
 
@@ -998,6 +1007,11 @@ async function submitResolve(withSave) {
   }
   let save = null;
   if (withSave) {
+    const parsedLinks = parseLinksJSON(byId("mg-links").value);
+    if (parsedLinks.error) {
+      setText("conflict-error", parsedLinks.error);
+      return;
+    }
     save = {
       title: byId("mg-title").value,
       status: byId("mg-status").value,
@@ -1005,6 +1019,7 @@ async function submitResolve(withSave) {
       triggers: parseTriggers(byId("mg-triggers").value),
       owner: byId("mg-owner").value,
       audience: byId("mg-audience").value,
+      links: parsedLinks.links,
       body: byId("mg-body").value,
     };
     // base_version is the precondition the server uses: omit on
@@ -1149,6 +1164,24 @@ async function apiFetch(path, opts) {
 function showView(name) {
   for (const v of ["login", "browse", "newdoc", "editor", "history", "publish", "conflicts", "conflict", "fleet", "error"]) {
     byId("view-" + v).hidden = (v !== name);
+  }
+  const navForView = {
+    browse: "nav-browse",
+    newdoc: "nav-browse",
+    editor: "nav-browse",
+    history: "nav-browse",
+    publish: "nav-publish",
+    conflicts: "nav-conflicts",
+    conflict: "nav-conflicts",
+    fleet: "nav-fleet",
+  };
+  const activeNav = navForView[name] || "";
+  for (const id of ["nav-browse", "nav-publish", "nav-conflicts", "nav-fleet"]) {
+    const el = byId(id);
+    const active = id === activeNav;
+    el.classList.toggle("active", active);
+    if (active) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
   }
 }
 

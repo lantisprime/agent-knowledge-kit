@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -67,6 +68,132 @@ func TestSaveDocRejectsInvalid(t *testing.T) {
 	}
 	if _, err := s.SaveDoc("nope", "x", DocSave{Status: "draft", Body: "b"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown collection: want ErrInvalid, got %v", err)
+	}
+}
+
+func TestSaveDocLinksValidateAndRoundTrip(t *testing.T) {
+	s := open(t)
+	valid := []DocLink{
+		{Relation: "reference", Collection: "docs", FamilyID: "target", Version: 2},
+		{Relation: "supersedes", Collection: "docs", FamilyID: "older", Version: 1},
+	}
+	v, err := s.SaveDoc("docs", "source", DocSave{Status: "draft", Body: "b", Links: valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetDoc("docs", "source", v.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Links, valid) {
+		t.Fatalf("links round trip: got %#v, want %#v", got.Links, valid)
+	}
+
+	without, err := s.SaveDoc("docs", "without", DocSave{Status: "draft", Body: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := s.GetDoc("docs", "without", without.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Links == nil || len(plain.Links) != 0 {
+		t.Fatalf("omitted links must read as non-nil empty array: %#v", plain.Links)
+	}
+
+	cases := []struct {
+		name  string
+		links []DocLink
+	}{
+		{"bad relation", []DocLink{{Relation: "mentions", Collection: "docs", FamilyID: "x", Version: 1}}},
+		{"zero version", []DocLink{{Relation: "reference", Collection: "docs", FamilyID: "x", Version: 0}}},
+		{"bad collection", []DocLink{{Relation: "reference", Collection: "../docs", FamilyID: "x", Version: 1}}},
+		{"bad family", []DocLink{{Relation: "reference", Collection: "docs", FamilyID: "../x", Version: 1}}},
+		{"duplicate", []DocLink{
+			{Relation: "reference", Collection: "docs", FamilyID: "x", Version: 1},
+			{Relation: "reference", Collection: "docs", FamilyID: "x", Version: 1},
+		}},
+		{"self", []DocLink{{Relation: "reference", Collection: "docs", FamilyID: "self", Version: 1}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.SaveDoc("docs", "self", DocSave{Status: "draft", Body: "b", Links: tc.links}); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("want ErrInvalid, got %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenMigratesV1DatabaseWithDocumentLinks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE collections (
+		  name TEXT PRIMARY KEY,
+		  delivery TEXT NOT NULL CHECK (delivery IN ('push','trigger','query')),
+		  in_release INTEGER NOT NULL DEFAULT 0
+		);
+		INSERT INTO collections (name, delivery, in_release) VALUES ('docs', 'trigger', 1);
+		CREATE TABLE doc_versions (
+		  id INTEGER PRIMARY KEY AUTOINCREMENT,
+		  collection TEXT NOT NULL REFERENCES collections(name),
+		  family_id TEXT NOT NULL,
+		  version INTEGER NOT NULL,
+		  title TEXT NOT NULL DEFAULT '',
+		  status TEXT NOT NULL CHECK (status IN ('draft','active','superseded')),
+		  owner TEXT NOT NULL DEFAULT '',
+		  audience TEXT NOT NULL DEFAULT '',
+		  tier TEXT NOT NULL DEFAULT '',
+		  triggers TEXT NOT NULL DEFAULT '',
+		  body TEXT NOT NULL,
+		  editor TEXT NOT NULL DEFAULT '',
+		  created_at TEXT NOT NULL,
+		  UNIQUE (collection, family_id, version)
+		);
+		CREATE UNIQUE INDEX one_active_per_family
+		  ON doc_versions (collection, family_id) WHERE status = 'active';
+		INSERT INTO doc_versions
+		  (collection, family_id, version, status, body, created_at)
+		  VALUES ('docs', 'source', 1, 'active', 'v1', '2026-08-08T00:00:00Z');
+	`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open v1 database: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	old, err := s.GetDoc("docs", "source", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Links == nil || len(old.Links) != 0 {
+		t.Fatalf("migrated v1 row links: %#v", old.Links)
+	}
+	v2, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "v2", Links: []DocLink{
+		{Relation: "supersedes", Collection: "docs", FamilyID: "source", Version: 1},
+	}})
+	if err != nil {
+		t.Fatalf("save linked version after migration: %v", err)
+	}
+	if _, err := s.CutRelease("", "tester"); err != nil {
+		t.Fatalf("cut migrated linked document: %v", err)
+	}
+	got, err := s.GetDoc("docs", "source", v2.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Links) != 1 || got.Links[0].Relation != "supersedes" {
+		t.Fatalf("migrated link round trip: %#v", got.Links)
 	}
 }
 
@@ -220,6 +347,171 @@ func TestCutReleaseLints(t *testing.T) {
 	if _, err := s.CutRelease("", "tester"); !errors.Is(err, ErrLint) {
 		t.Fatalf("over-cap kernel: want ErrLint, got %v", err)
 	}
+}
+
+func TestDocumentLinkReleaseLints(t *testing.T) {
+	t.Run("active source referencing draft target is blocked", func(t *testing.T) {
+		s := open(t)
+		if _, err := s.SaveDoc("docs", "target", DocSave{Status: "draft", Body: "draft"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "source", Links: []DocLink{
+			{Relation: "reference", Collection: "docs", FamilyID: "target", Version: 1},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.PreviewRelease(); !errors.Is(err, ErrLint) || !strings.Contains(err.Error(), "draft") {
+			t.Fatalf("preview: want draft-reference ErrLint, got %v", err)
+		}
+		if got := mustList(t, s); len(got) != 0 {
+			t.Fatalf("preview must not record: %+v", got)
+		}
+		_, err := s.CutRelease("", "alice")
+		var cre *ConflictRecordedError
+		if !errors.Is(err, ErrLint) || !errors.As(err, &cre) {
+			t.Fatalf("cut: want recorded ErrLint, got %v", err)
+		}
+		conflict, err := s.GetConflict(cre.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conflict.Collection != "docs" || conflict.FamilyID != "source" || conflict.TheirVersion != 1 {
+			t.Fatalf("policy conflict must identify source v1: %+v", conflict)
+		}
+	})
+
+	t.Run("dangling supersession is blocked", func(t *testing.T) {
+		s := open(t)
+		if _, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "source", Links: []DocLink{
+			{Relation: "supersedes", Collection: "docs", FamilyID: "missing", Version: 7},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.PreviewRelease(); !errors.Is(err, ErrLint) || !strings.Contains(err.Error(), "does not exist") {
+			t.Fatalf("want dangling-supersession ErrLint, got %v", err)
+		}
+	})
+
+	t.Run("supersession target must already be superseded", func(t *testing.T) {
+		for _, status := range []string{"draft", "active"} {
+			t.Run(status, func(t *testing.T) {
+				s := open(t)
+				if _, err := s.SaveDoc("docs", "target", DocSave{Status: status, Body: "target"}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "source", Links: []DocLink{
+					{Relation: "supersedes", Collection: "docs", FamilyID: "target", Version: 1},
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.PreviewRelease(); !errors.Is(err, ErrLint) || !strings.Contains(err.Error(), "must be superseded") {
+					t.Fatalf("want supersession-status ErrLint, got %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("reference target must be release-bearing", func(t *testing.T) {
+		s := open(t)
+		if _, err := s.db.Exec(`INSERT INTO collections (name, delivery, in_release) VALUES ('query', 'query', 0)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("query", "target", DocSave{Status: "active", Body: "target"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "source", Links: []DocLink{
+			{Relation: "reference", Collection: "query", FamilyID: "target", Version: 1},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.PreviewRelease(); !errors.Is(err, ErrLint) || !strings.Contains(err.Error(), "not release-bearing") {
+			t.Fatalf("want non-release-target ErrLint, got %v", err)
+		}
+	})
+
+	t.Run("reference to missing or superseded target is blocked", func(t *testing.T) {
+		for _, target := range []struct {
+			name    string
+			family  string
+			version int
+		}{
+			{name: "missing", family: "absent", version: 1},
+			{name: "superseded", family: "target", version: 1},
+		} {
+			t.Run(target.name, func(t *testing.T) {
+				s := open(t)
+				if target.name == "superseded" {
+					if _, err := s.SaveDoc("docs", "target", DocSave{Status: "active", Body: "v1"}); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := s.SaveDoc("docs", "target", DocSave{Status: "active", Body: "v2"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "source", Links: []DocLink{
+					{Relation: "reference", Collection: "docs", FamilyID: target.family, Version: target.version},
+				}}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.PreviewRelease(); !errors.Is(err, ErrLint) {
+					t.Fatalf("want ErrLint, got %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("valid active reference and superseded target cut", func(t *testing.T) {
+		s := open(t)
+		if _, err := s.SaveDoc("docs", "target", DocSave{Status: "active", Body: "v1"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("docs", "target", DocSave{Status: "active", Body: "v2"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "source", Links: []DocLink{
+			{Relation: "reference", Collection: "docs", FamilyID: "target", Version: 2},
+			{Relation: "supersedes", Collection: "docs", FamilyID: "target", Version: 1},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CutRelease("", "alice"); err != nil {
+			t.Fatalf("valid links must cut: %v", err)
+		}
+	})
+
+	t.Run("matching body hash cannot bypass link revalidation", func(t *testing.T) {
+		s := open(t)
+		if _, err := s.SaveDoc("docs", "target", DocSave{Status: "active", Body: "same-body"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SaveDoc("docs", "source", DocSave{Status: "active", Body: "source", Links: []DocLink{
+			{Relation: "reference", Collection: "docs", FamilyID: "target", Version: 1},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		preview, err := s.PreviewRelease()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Advance the target with byte-identical content. The release
+		// content hash remains unchanged, but the exact v1 link is now
+		// superseded and must be re-linted inside CutRelease.
+		if _, err := s.SaveDoc("docs", "target", DocSave{Status: "active", Body: "same-body"}); err != nil {
+			t.Fatal(err)
+		}
+		current, err := s.PreviewRelease()
+		if !errors.Is(err, ErrLint) {
+			t.Fatalf("advanced target must invalidate exact reference: %v", err)
+		}
+		if current.ContentHash != "" {
+			t.Fatalf("linting preview must return zero manifest: %+v", current)
+		}
+		_, err = s.CutRelease(preview.ContentHash, "alice")
+		var cre *ConflictRecordedError
+		if !errors.Is(err, ErrLint) || !errors.As(err, &cre) {
+			t.Fatalf("matching body hash must not bypass link lint: %v", err)
+		}
+	})
 }
 
 // TestCutReleaseKernelByteCap (F7) — CutRelease must reject a kernel
@@ -884,6 +1176,7 @@ func TestStaleSaveOpensConflictRecord(t *testing.T) {
 	rejected := DocSave{
 		Title: "attempted", Status: "draft", Tier: "B", Triggers: []string{"a", "b"},
 		Owner: "alice", Audience: "ops", Body: "attempted-body",
+		Links:  []DocLink{{Relation: "reference", Collection: "docs", FamilyID: "target", Version: 1}},
 		Editor: "alice", BaseVersion: &stale,
 	}
 	_, err := s.SaveDoc("docs", "f", rejected)
@@ -934,6 +1227,9 @@ func TestStaleSaveOpensConflictRecord(t *testing.T) {
 	}
 	if len(got.Attempted.Triggers) != 2 || got.Attempted.Triggers[0] != "a" || got.Attempted.Triggers[1] != "b" {
 		t.Fatalf("attempted triggers: %#v", got.Attempted.Triggers)
+	}
+	if !reflect.DeepEqual(got.Attempted.Links, rejected.Links) {
+		t.Fatalf("attempted links: got %#v, want %#v", got.Attempted.Links, rejected.Links)
 	}
 	// Editor must NOT be persisted in the attempted JSON (it carries
 	// opened_by identity). The tag json:"-" on DocSave.Editor does

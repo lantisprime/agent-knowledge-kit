@@ -7,7 +7,9 @@ delivery trust boundary (`delivery-trust-boundary.md`). Implementation
 has landed for build-order steps 1–7 (store + schema + release cut;
 thin subscriber with token-bound identity; authN; embedded curation
 UI; conflict records + merge view; fleet page + force-resync UI);
-the Git transport and two-principal fixture publisher are retired.
+the Git transport and two-principal fixture publisher are retired. The first
+approved post-v1 slice, immutable document links plus release lints, is defined
+in `document-link-lints.md`.
 
 ## Operator constraints (fixed)
 
@@ -70,13 +72,11 @@ collections:
 v1 ships the curated collections (kernel, procedure docs). The
 non-v1 columns of the table above are the *target*, not what v1's
 schema already holds: `collections` currently carries a `delivery`
-policy and an `in_release` membership flag, so per-collection
-write-path and lifecycle rules, the "draft referenced by an active
-doc" reference lint, and promotion provenance each need an
-**additive** schema change when their slice lands (e.g.
-`collections.write_path`, `collections.lifecycle`, a `doc_links`
-table, a `provenance` column on `doc_versions`). These are additive —
-no rewrite of shipped tables — but they are not free. Release
+policy and an `in_release` membership flag. The approved post-v1 link slice
+adds `doc_links` without rewriting shipped tables. Per-collection write-path
+and lifecycle rules plus promotion provenance still need additive schema
+changes when their slices land (for example `collections.write_path`,
+`collections.lifecycle`, and a `provenance` column on `doc_versions`). Release
 membership is the `in_release` flag, not the delivery tier: v1 seeds
 both `kernel` (push) and `docs` (trigger) with `in_release = 1`,
 because Tier B procedure docs must be materialized on the host to be
@@ -85,7 +85,8 @@ trigger-loaded. Query-tier collections are not in the snapshot.
 - A document row carries the schema fields (`family-id`, `version`,
   `title`, `status`, `owner`, `audience`, `tier`, `triggers`, body)
   plus timestamps and editor identity. Every save is a new immutable
-  version row; supersession is a status change, never a delete.
+  version row; supersession is a status change, never a delete. Ordered
+  `reference` and `supersedes` links belong to that exact source version.
 - The store is the trust boundary: `collection` and `family` are
   validated at `SaveDoc` before any path is built from them — empty,
   a leading `.`, `/`, `\`, a `..` substring, NUL, an ASCII control
@@ -101,6 +102,10 @@ trigger-loaded. Query-tier collections are not in the snapshot.
 - Kernel release lint is two-door at cut time: the ~2000-word Tier A
   cap AND a hard `24576`-byte (24 KiB) backstop, so a whitespace- or
   zero-width-joined body that fools the word count still cannot ship.
+- Link release lints require each active `reference` to name the exact active
+  target version in a release-bearing collection and each `supersedes` target
+  to exist with `superseded` status. Drafts may retain forward links while
+  being curated; preview/cut is the enforcement point.
 - Promotion across collections is a first-class UI action (post-v1,
   needs the provenance column above): an episode that proves durable
   becomes a behavioral pattern or Tier B doc, linked to its sources.
@@ -127,15 +132,11 @@ conflicted, both versions, who resolved it, the winning version, when.
   resolution (v1: manual flagging; automated detection later).
   **Shipped (step 5)** as the manual flag path; automated detection
   remains deferred.
-- *Policy conflicts* — publish-blocking lints: kernel over cap, a
-  draft referenced by an active doc, dangling supersession.
-  **Shipped (step 5) for kernel-cap lints only**: byte-cap and
-  word-cap failures auto-open a policy record on the offending
-  family, and a successful cut auto-resolves every open policy
-  record. The draft-reference and dangling-supersession lints
-  depend on the post-v1 `doc_links` slice and are NOT shipped —
-  the plan-doc "Conflict management" edit above says so
-  explicitly.
+- *Policy conflicts* — publish-blocking lints: kernel over cap, a draft or
+  otherwise invalid target referenced by an active doc, and dangling or
+  invalid supersession. **Shipped**: failures auto-open a policy record on the
+  offending source family, and a successful cut auto-resolves every open
+  policy record. Link details are specified in `document-link-lints.md`.
 - *Cross-collection conflicts* — an API-submitted episode that
   contradicts an active curated doc surfaces for human resolution:
   supersede the doc or mark the episode wrong. Lands with the
@@ -215,7 +216,9 @@ conflict record (stale-base save, lint-failed cut).
 
 - `PUT /api/docs/{collection}/{family}` — save a new doc version.
   Request: `{"title", "status": "draft|active", "tier", "triggers":
-  [..], "owner", "audience", "body", "base_version"?}`. `base_version`
+  [..], "owner", "audience", "body", "links"?, "base_version"?}`. Each
+  link is `{"relation":"reference|supersedes", "collection",
+  "family_id", "version":N}`; omission means an empty array. `base_version`
   is optional; when present and it does not equal the family's current
   max version, the save is rejected `409 {"error": "conflict", ...}`.
   Response: `{"collection", "family_id", "version", "status",
@@ -236,7 +239,8 @@ conflict record (stale-base save, lint-failed cut).
   curation reads (step 4): latest-version-per-family listing, one doc
   (absent `version` = latest; a supplied empty/zero/negative/
   non-numeric version is `400 invalid`), and newest-first version
-  history. Trigger values may not be empty or contain `","` — the
+  history. Full document reads return the selected version's `links` as an
+  array (including `[]`). Trigger values may not be empty or contain `","` — the
   store persists them comma-joined and rejects the lossy cases at
   `SaveDoc`.
 - `GET /api/releases/preview` — operator-only (step 4): the would-be
@@ -416,8 +420,8 @@ know the server exists.
    stale save with latest attempted payload + attempts counter; claim
    flagging with canonicalized pair + version snapshots; policy
    records auto-opened on failed cut / auto-resolved by the next
-   successful cut — kernel-cap lints only, draft-reference and
-   dangling-supersession lints await the post-v1 doc_links slice;
+   successful cut — kernel-cap lints in v1, extended by the approved post-v1
+   `doc_links` slice;
    merge view with body diff, metadata diff, atomic save-and-resolve
    behind an attempts precondition; conflict endpoints
    operator-only).
