@@ -8,15 +8,16 @@ together with `CLAUDE.md`; the stricter instruction wins.
 1. This repository is the sole source of truth for the generic kit: its
    architecture, schemas, kernel template, adapters, tests, compatibility
    policy, and releases.
-2. Environment repositories and private corpora are consumers. They may pin a
-   released kit version and own environment-specific integration, but they do
-   not define or publish the kit. In particular, `home-network` is not a
-   controller or upstream specification for this repository.
+2. Environment repositories and private knowledge-server deployments are
+   consumers. They may pin a released kit version and own environment-specific
+   integration, but they do not define or publish the kit. In particular,
+   `home-network` is not a controller or upstream specification for this
+   repository.
 3. Proposed generic changes discovered in a consumer belong in this
    repository and must be reviewed here. Do not maintain a canonical copy of
    generic kit design or code in a consumer repository.
 4. This public repository must contain no real hostnames, IP addresses,
-   usernames, namespaces, topology, credentials, or private corpus content.
+   usernames, namespaces, topology, credentials, or private knowledge.
 5. Forgejo is the authoritative Git service and the only permitted push
    target. Never push to GitHub. A read mirror, if the operator separately
    authorizes one, is not a release or governance authority.
@@ -56,9 +57,9 @@ Use this order when evidence conflicts:
 7. `README.md` for the public interface.
 8. External designs, integration ADRs, reviews, and historical artifacts.
 
-Distinguish `implemented`, `prototype`, `planned`, and `deferred`. The current
-scripts demonstrate the happy path but are not hardened. Never present a
-policy stated only in prose as an enforced guarantee.
+Distinguish `implemented`, `prototype`, `planned`, and `deferred`. Knowledge-
+server v1 is implemented, but its documented residual risks and post-v1 gaps
+remain. Never present a policy stated only in prose as an enforced guarantee.
 
 ## Change workflow
 
@@ -75,28 +76,30 @@ For non-trivial changes:
 7. `[handoff] -> verify:` decisions, files, repository state, exact results,
    limitations, and next step are recorded.
 
-Security regressions require a negative test first. Treat corpus input,
-remote metadata, filesystem paths, managed-block markers, and adapter targets
-as untrusted. Do not expand deployment or fleet automation until the delivery
-trust boundary and release authentication are implemented and tested.
+Security regressions require a negative test first. Treat API input, release
+metadata, archives, filesystem paths, managed-block markers, and adapter
+targets as untrusted. Non-loopback exposure must preserve the authentication
+plus TLS gate. Environment deployment and fleet automation belong to consumer
+repositories, not this kit.
 
 ## Repository boundaries
 
 - `agent-knowledge-kit`: generic, public framework and its release lifecycle.
 - consumer repository: environment integration, version pin, installation,
   deployment, and operational monitoring.
-- private corpus: environment kernel, routing, procedures, and sensitive facts.
+- private server data: environment kernel, procedures, and sensitive facts.
 
 Dependency direction is one-way:
 
 ```text
-agent-knowledge-kit release -> consumer pin -> private corpus validation
+agent-knowledge-kit release -> consumer pin -> server/subscriber deployment
+                                           -> private database and releases
 ```
 
 The kit must not reach into a consumer to obtain its design, tests, schemas,
-or release inputs. A consumer must not push, tag, release, or rewrite this
-repository. Cross-repository automation may open a change request, but the
-change must be reviewed and released from the kit repository.
+private knowledge, or release inputs. A consumer must not push, tag, release,
+or rewrite this repository. Cross-repository automation may open a change
+request, but the change must be reviewed and released from the kit repository.
 
 ## Documentation discipline
 

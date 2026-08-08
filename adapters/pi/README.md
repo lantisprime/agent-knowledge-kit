@@ -11,9 +11,9 @@ adapters/pi/run.sh ...
 ```
 
 The launcher honors `KNOWLEDGE_HOME`, resolves the supported nested or flat
-layout, refuses symbolic links and paths that escape the corpus checkout, and
+layout, refuses symbolic links and paths that escape the active corpus, and
 then runs `pi --append-system-prompt <validated-kernel> ...`. Do not point pi
-directly at the mutable corpus path; that bypasses source containment.
+directly at an unvalidated path; that bypasses source containment.
 
 `--append-system-prompt` accepts a file path, is repeatable, and works with
 `--no-extensions`. If you orchestrate seats from a playbook that pins the
@@ -30,5 +30,5 @@ managed block, covers pi automatically.
 ## Tier B
 
 Ship procedure docs as pi prompt templates (`--prompt-template <path|dir>`)
-from the synced corpus, and the operator (or orchestrator) loads them when
-the task matches.
+from the subscriber-materialized corpus, and the operator (or orchestrator)
+loads them when the task matches.

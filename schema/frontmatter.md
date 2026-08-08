@@ -1,35 +1,48 @@
-# Corpus document schema
+# Portable corpus metadata reference
 
-Every corpus document is markdown with YAML frontmatter:
+Knowledge-server v1 stores document metadata in SQLite and accepts writes only
+through its UI/API. It does **not** import Markdown frontmatter. This reference
+defines the portable shape used when exporting, reviewing, or proposing a
+document outside the server; the HTTP contract in
+`docs/plans/knowledge-server.md` remains authoritative.
 
 ```yaml
 ---
-title: Cluster test-sandbox contract
-status: active            # active | superseded | draft
-supersedes: null          # slug of the doc this replaces, if any
-owner: ops                # who answers for this doc's correctness
-audience: agent           # agent | human | both
-tier: B                   # A (kernel-included) | B (trigger-loaded) | C (query-only)
-verify: "kubectl get ns"  # optional: falsifiable check for the doc's key claim
-generated-from: null      # optional: source-of-truth ref for factual tables
-                          #   (inventory system, CMDB, IaC output) — facts are
-                          #   generated, never hand-forked
-triggers: ["deploy", "kubectl", "ssh"]   # optional: Tier B load hints
+collection: docs            # kernel | docs in v1
+family-id: test-sandbox     # stable family identifier
+version: 3                  # server-assigned; omit on a new save
+title: Test-sandbox contract
+status: active              # draft | active | superseded
+owner: ops
+audience: agent
+tier: B
+triggers: ["deploy", "test"]
+editor: operator            # server-recorded identity
+created-at: 2026-08-08T00:00:00Z
 ---
 ```
 
-Rules:
+The Markdown below the frontmatter is the document `body`. The subscriber's
+release archive contains body bytes at the manifest path; it does not prepend
+this metadata.
 
-1. **One claim, one home.** A fact lives in its source of truth and is
-   `generated-from` everywhere else. A procedure lives in exactly one doc.
-2. **Supersede in place.** Never publish a corrected doc alongside the old
-   one as a peer. Flip the old doc to `status: superseded`, point
-   `supersedes:` from the new one, and let git history keep the past.
-3. **Kernel changes are PR-only** and bounded by the kernel token cap. If a
-   kernel edit pushes past the cap, something else must leave — that
-   argument happens in the PR, not in the file.
-4. **`verify:` beats prose.** For capability claims ("harness X loads file
-   Y"), include the one-line check that proves it. Reviewers run it; agents
-   can too.
-5. **Drafts don't ship.** `status: draft` docs are excluded from the synced
-   bundle by the sync tooling.
+## Enforced v1 rules
+
+1. Every save inserts a new immutable version. The server assigns `version`,
+   `editor`, and `created-at`.
+2. At most one active version exists per `(collection, family-id)`.
+3. Draft and superseded versions remain in history but do not enter releases.
+4. The `kernel` and `docs` collections enter v1 releases. Query-only future
+   collections do not exist yet.
+5. A release is blocked when an active kernel body exceeds 2,000 words or
+   24,576 bytes.
+6. Collection and family identifiers use the server's narrow validated
+   character set because they become archive paths.
+7. Trigger strings may not be empty or contain a comma in v1.
+
+## Not represented in v1
+
+`supersedes`, `verify`, `generated-from`, document links, write-path policy,
+lifecycle policy, and promotion provenance are not stored fields. Adding them
+requires an additive schema/API slice; prose or frontmatter alone does not make
+them enforced behavior.

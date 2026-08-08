@@ -65,7 +65,7 @@ func main() {
 	server := flag.String("server", "", "knowledge-server base URL, e.g. https://ks.example:8471 (required)")
 	home := flag.String("home", defaultHome(), "KNOWLEDGE_HOME directory")
 	host := flag.String("host", defaultHost(), "host id reported to the server; ignored when -token-file is set (the token's bound identity is used)")
-	tokenFile := flag.String("token-file", "", "path to this host's bearer token; sent as Authorization: Bearer on every request. Assumes the server has auth enabled; against an auth-disabled server, corpus sync still works but heartbeats and force-resync are inert.")
+	tokenFile := flag.String("token-file", "", "path to this host's bearer token; sent as Authorization: Bearer on every request. Assumes the server has auth enabled; against an auth-disabled server, corpus materialization still works but heartbeats and force-resync are inert.")
 	caFile := flag.String("ca-file", "", "PEM CA bundle used to verify the server's TLS certificate (for private/self-signed CAs)")
 	interval := flag.Duration("interval", 60*time.Second, "poll interval between converge passes")
 	once := flag.Bool("once", false, "run a single converge pass and exit (for cron and tests)")
@@ -277,7 +277,7 @@ func converge(server, home, host, token string, hc *http.Client) {
 
 	// Always install the freshly-downloaded, hash-verified tree as a
 	// NEW directory — never reuse a pre-existing releases/<id> dir.
-	// The corpus checkout is agent-writable, so a pre-existing dir
+	// The materialized corpus is agent-writable, so a pre-existing dir
 	// with this same id could have been tampered with locally; reusing
 	// it would serve tampered content while reporting success on a
 	// force-resync, defeating the recovery tool. Old dirs are simply

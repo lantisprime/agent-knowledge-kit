@@ -11,7 +11,7 @@ akk_resolve_kernel() {
     knowledge_home=$1
     corpus_root="$knowledge_home/corpus"
 
-    if ! corpus_root_phys=$(CDPATH= cd -P "$corpus_root" 2>/dev/null && pwd -P); then
+    if ! corpus_root_phys=$(CDPATH='' cd -P "$corpus_root" 2>/dev/null && pwd -P); then
         return 2
     fi
 
@@ -32,14 +32,14 @@ akk_resolve_kernel() {
 
         kernel_parent=${kernel_path%/*}
         kernel_name=${kernel_path##*/}
-        if ! kernel_parent_phys=$(CDPATH= cd -P "$kernel_parent" 2>/dev/null && pwd -P); then
+        if ! kernel_parent_phys=$(CDPATH='' cd -P "$kernel_parent" 2>/dev/null && pwd -P); then
             akk_refuse_kernel 'kernel parent cannot be resolved'
             return 1
         fi
         case "$kernel_parent_phys/$kernel_name" in
         "$corpus_root_phys"/*) ;;
         *)
-            akk_refuse_kernel 'kernel path escapes the corpus checkout'
+            akk_refuse_kernel 'kernel path escapes the active corpus'
             return 1
             ;;
         esac
