@@ -1,13 +1,14 @@
 # Knowledge-server architecture
 
-Status: **implemented v1 plus approved document-link lint slice** (v1 steps
-1–7 cut over 2026-08-08; link slice approved 2026-08-08).
+Status: **implemented v1 plus approved post-v1 slices** (v1 steps 1–7 cut over
+2026-08-08; document links and subscriber protocol compatibility implemented).
 
-The accepted v1 contract is `docs/plans/knowledge-server.md`; the approved
-link-slice contract is `docs/plans/document-link-lints.md`. This file records
-the current architecture and separates it from post-v1 targets. The
-earlier Git transport, event-propagation design, and two-principal publication
-boundary are superseded; their historical contract remains in
+The accepted v1 contract is `docs/plans/knowledge-server.md`; approved
+post-v1 contracts are `docs/plans/document-link-lints.md` and
+`docs/plans/subscriber-protocol-compatibility.md`. This file records the
+current architecture and separates it from post-v1 targets. The earlier Git
+transport, event-propagation design, and two-principal publication boundary
+are superseded; their historical contract remains in
 `docs/plans/delivery-trust-boundary.md` and Git history only.
 
 ## Authority and repository boundary
@@ -104,7 +105,10 @@ client with no direct database access. It provides:
 
 Operator endpoints cover document writes/reads, release cuts, host-token
 issue/revoke, fleet state, resync, and conflicts. Subscriber endpoints expose
-the current manifest, immutable archive, and heartbeat write.
+the current manifest, immutable archive, and heartbeat write. Those three
+routes negotiate `Agent-Knowledge-Protocol-Version: 1` after authentication;
+missing headers mean legacy v1, while incompatible advertised versions fail
+before the handler processes a manifest, archive, or heartbeat.
 
 With authentication enabled, every request needs a bearer token. Host tokens
 are bound identities and may read releases and heartbeat only as their bound
@@ -127,6 +131,12 @@ It independently reproduces the content-hash algorithm and does not import the
 store package. Manifest paths and tar entries are untrusted. It rejects empty,
 absolute, escaping, `..`, non-regular, unmanifested, or missing
 entries before accepting a tree.
+
+The subscriber sends protocol v1 on current-release, archive, and heartbeat
+requests. It accepts an omitted response header from a legacy v1 server, but
+rejects any other advertised version before consuming the manifest or archive.
+This supports either server-first or subscriber-first rolling upgrades while
+preserving the last-good corpus on incompatibility.
 
 Every materialization uses a fresh directory. Force-resync removes the local
 applied marker and re-fetches even when the release id matches; it never trusts
@@ -219,14 +229,14 @@ consumer-environment checks.
 
 ## Post-v1 work
 
-The document-link schema plus draft-reference/dangling-supersession lints are
-the first approved post-v1 slice; `docs/plans/document-link-lints.md` is its
-contract. Remaining candidate slices are unordered:
+Implemented post-v1 contracts cover document-link release lints and subscriber
+wire-protocol compatibility. Remaining candidate slices are unordered:
 
 - automated claim-conflict detection;
 - additional collections, machine-submitted streams, and provenance;
 - an optional SSE release doorbell while retaining polling convergence;
-- kit/schema versioning and authenticated binary release distribution;
+- broader document/database schema versioning and authenticated binary release
+  distribution;
 - multi-instance/HA or Postgres, if scale requires them.
 
 Environment deployment, backups, host inventory, and migration remain outside

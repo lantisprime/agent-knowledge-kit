@@ -5,8 +5,8 @@
 >   entry points without importing consumer-repository assumptions.
 > - **Authority:** navigation aid; `AGENTS.md`, `CLAUDE.md`, the accepted plan,
 >   tests, schema, and implementation remain governing evidence.
-> - **Verified:** 2026-08-08 against the document-link lint working tree based
->   on Forgejo `main` at `3953faf`.
+> - **Verified:** 2026-08-11 against the subscriber-protocol working tree based
+>   on Forgejo `main` at `26862ad`.
 > - **Update trigger:** ownership, architecture, lifecycle, directory roles,
 >   supported adapters, verification entry points, or terminology changes.
 
@@ -20,9 +20,9 @@ corpus pointer.
 
 Knowledge-server build-order steps 1–7 are implemented. The step-7 cutover
 retired Git as a private-corpus transport and removed the two-principal fixture
-publisher. The first approved post-v1 slice adds immutable document links and
-release-policy lints. Forgejo remains the sole authority for this kit's source
-and releases.
+publisher. Implemented post-v1 slices add immutable document links,
+release-policy lints, and rolling-safe subscriber protocol negotiation.
+Forgejo remains the sole authority for this kit's source and releases.
 
 ## 2. Authority and dependency direction
 
@@ -31,6 +31,7 @@ and releases.
 | Generic architecture and trust model | `docs/architecture.md` |
 | Detailed v1 contract and API | `docs/plans/knowledge-server.md` |
 | Document-link schema and release lints | `docs/plans/document-link-lints.md` |
+| Subscriber wire compatibility | `docs/plans/subscriber-protocol-compatibility.md` |
 | Agent/contributor contract | `AGENTS.md`, `CLAUDE.md` |
 | Public interface | `README.md` |
 | Store/API/subscriber implementation | `knowledge-server/` |
@@ -56,7 +57,8 @@ A consumer cannot tag, publish, or rewrite the kit.
 | `README.md` | User-facing contract and quickstart | Shipped interface |
 | `docs/architecture.md` | Current system and trust decisions | Current implemented record |
 | `docs/plans/knowledge-server.md` | Detailed store/API/subscriber/UI contract | Accepted; steps 1–7 implemented |
-| `docs/plans/document-link-lints.md` | Immutable link schema and post-v1 release lints | Approved post-v1 slice |
+| `docs/plans/document-link-lints.md` | Immutable link schema and post-v1 release lints | Approved; implemented |
+| `docs/plans/subscriber-protocol-compatibility.md` | Rolling-safe subscriber wire-version contract | Approved; implemented |
 | `docs/plans/delivery-trust-boundary.md` | Previous two-principal design | Superseded historical record |
 | `knowledge-server/main.go` | Server flags, exposure gate, HTTP lifecycle | Implemented |
 | `knowledge-server/api.go` | Only HTTP/API write door and endpoint schemas | Implemented |
@@ -83,7 +85,7 @@ operator UI/API
     -> SQLite document versions
     -> transactional immutable release
     -> manifest + archive
-    -> per-host authenticated subscriber
+    -> per-host authenticated, protocol-gated subscriber
     -> releases/<id>[.<n>]
     -> atomic corpus symlink
     -> harness adapter
@@ -94,7 +96,7 @@ The subscriber uses polling in v1. Server failure retains the last-good corpus;
 bad manifests, archives, hashes, redirects, credentials, or filesystem writes
 never replace it. The fleet page is the fail-loud operator surface.
 
-## 5. Implemented v1 and approved post-v1 slice
+## 5. Implemented v1 and approved post-v1 slices
 
 - SQLite collections, immutable document versions, one-active-per-family, and
   transactional release cuts.
@@ -108,15 +110,15 @@ never replace it. The fleet page is the fail-loud operator surface.
   bounded request bodies, and server read/idle timeouts.
 - Subscriber fail-soft convergence, path/tar containment, exact manifest-set
   materialization, hash verification, fresh-directory force-resync, atomic
-  corpus selection, and heartbeat.
+  corpus selection, heartbeat, and rolling-safe wire-protocol negotiation.
 - Fleet current/stale/dark classification and persistent force-resync flags.
 - Claude, Codex, and pi kernel adapters with shared containment and managed
   marker regressions.
 
 Not implemented: Tier B trigger loading, automated claim detection,
 additional collections, machine-submitted streams, SSE notifications,
-multi-instance HA, Postgres, kit/schema compatibility negotiation, or
-authenticated binary distribution.
+multi-instance HA, Postgres, broader document/database schema compatibility,
+or authenticated binary distribution.
 
 ## 6. Security boundaries
 
@@ -131,10 +133,13 @@ authenticated binary distribution.
   present mode-0600 token files or local releases as a principal boundary.
 - Subscriber failure keeps the last-good corpus; operator observability must
   surface stale/error/dark hosts.
+- An incompatible advertised subscriber protocol fails before manifest or
+  archive bytes can replace the selected corpus; an omitted header remains
+  legacy v1 for rolling upgrades.
 
 ## 7. Change and release workflow
 
-Until authenticated binary releases and compatibility negotiation land:
+Until authenticated binary releases land:
 
 ```text
 isolated branch/worktree -> reproduce -> minimum implementation
@@ -194,6 +199,7 @@ negative cutover regression.
 | document link | Version-specific `reference` or `supersedes` relationship owned by one source version |
 | release | Immutable manifest/archive snapshot of active release-bearing docs |
 | subscriber | Thin host client that verifies and materializes releases |
+| subscriber protocol | Versioned current/archive/heartbeat wire contract; v1 is rolling-compatible with omitted legacy headers |
 | corpus | Subscriber-selected local release exposed at `$KNOWLEDGE_HOME/corpus` |
 | Tier A / kernel | Small operating contract injected into every fresh session |
 | Tier B | Materialized procedure docs intended for trigger-based loading |

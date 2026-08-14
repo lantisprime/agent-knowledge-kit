@@ -118,7 +118,11 @@ with subscriber `-token-file`. Use `-ca-file` for a private CA.
 The subscriber verifies the release manifest, every archive entry, and the
 content hash before installing a fresh version directory and atomically
 switching `corpus`. Any failure retains the last-good release and reports a
-best-effort heartbeat.
+best-effort heartbeat. On current-release, archive, and heartbeat requests it
+sends `Agent-Knowledge-Protocol-Version: 1`; the server advertises the same
+version. Missing headers remain compatible with legacy v1 during rolling
+upgrades, while an advertised incompatible version fails before corpus
+selection changes.
 
 ## Curation and lifecycle
 
@@ -161,7 +165,8 @@ node --test ui/lib_test.mjs
 `tests/run.sh` covers adapter containment, managed-marker safety, and the
 subscriber-materialized cutover shape. The Go suite covers store/API/auth/UI
 and subscriber convergence, including fail-soft behavior, archive traversal,
-hash mismatch, TLS pinning, force-resync, and fleet/conflict behavior.
+hash mismatch, protocol incompatibility, TLS pinning, force-resync, and
+fleet/conflict behavior.
 
 ## Governance
 

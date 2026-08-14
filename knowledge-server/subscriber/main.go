@@ -46,6 +46,11 @@ type currentRelease struct {
 	Resync      bool          `json:"resync"`
 }
 
+const (
+	subscriberProtocolHeader  = "Agent-Knowledge-Protocol-Version"
+	subscriberProtocolVersion = "1"
+)
+
 type manifestDoc struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -323,7 +328,24 @@ func apiGet(hc *http.Client, u, token string) (*http.Response, error) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	req.Header.Set(subscriberProtocolHeader, subscriberProtocolVersion)
 	return hc.Do(req)
+}
+
+// validateProtocolResponse accepts a missing header as legacy v1 so a new
+// subscriber can roll out before its server. Once a server advertises a
+// version, it must advertise exactly one supported value. Callers check this
+// before consuming a manifest or archive so incompatible bytes can never
+// replace the last-good corpus.
+func validateProtocolResponse(resp *http.Response) error {
+	versions := resp.Header.Values(subscriberProtocolHeader)
+	if len(versions) == 0 {
+		return nil
+	}
+	if len(versions) != 1 || versions[0] != subscriberProtocolVersion {
+		return fmt.Errorf("incompatible protocol response")
+	}
+	return nil
 }
 
 func fetchCurrent(hc *http.Client, server, host, token string) (currentRelease, error) {
@@ -338,6 +360,9 @@ func fetchCurrent(hc *http.Client, server, host, token string) (currentRelease, 
 		return currentRelease{}, fmt.Errorf("GET %s: %w", u, err)
 	}
 	defer resp.Body.Close()
+	if err := validateProtocolResponse(resp); err != nil {
+		return currentRelease{}, fmt.Errorf("GET %s: %w", u, err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return currentRelease{}, fmt.Errorf("GET %s: unexpected status %s", u, resp.Status)
 	}
@@ -355,6 +380,9 @@ func fetchAndExtractArchive(hc *http.Client, server, token string, releaseID int
 		return fmt.Errorf("GET %s: %w", u, err)
 	}
 	defer resp.Body.Close()
+	if err := validateProtocolResponse(resp); err != nil {
+		return fmt.Errorf("GET %s: %w", u, err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: unexpected status %s", u, resp.Status)
 	}
@@ -562,6 +590,7 @@ func heartbeat(hc *http.Client, server, host, token string, releaseID int64, ok 
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(subscriberProtocolHeader, subscriberProtocolVersion)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -572,6 +601,10 @@ func heartbeat(hc *http.Client, server, host, token string, releaseID int64, ok 
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
+	if err := validateProtocolResponse(resp); err != nil {
+		log.Printf("subscriber: heartbeat: %v", err)
+		return
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		log.Printf("subscriber: heartbeat: unexpected status %s", resp.Status)
 	}
