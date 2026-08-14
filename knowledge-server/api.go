@@ -24,6 +24,13 @@ type api struct {
 	now  func() time.Time
 }
 
+const (
+	subscriberProtocolHeader  = "Agent-Knowledge-Protocol-Version"
+	subscriberProtocolVersion = "1"
+)
+
+var errIncompatibleProtocol = errors.New("incompatible subscriber protocol version")
+
 // newMux wires each route through secure with its access policy:
 // writes and fleet actions are operator-only; release reads and
 // heartbeats accept any valid token, with host binding enforced in the
@@ -38,9 +45,9 @@ func newMux(st *store.Store, auth *authState) *http.ServeMux {
 	mux.HandleFunc("GET /api/docs/{collection}/{family}/versions", a.secure(true, a.docHistory))
 	mux.HandleFunc("GET /api/releases/preview", a.secure(true, a.previewRelease))
 	mux.HandleFunc("POST /api/releases", a.secure(true, a.cutRelease))
-	mux.HandleFunc("GET /api/releases/current", a.secure(false, a.currentRelease))
-	mux.HandleFunc("GET /api/releases/{id}/archive", a.secure(false, a.archive))
-	mux.HandleFunc("POST /api/heartbeats", a.secure(false, a.heartbeat))
+	mux.HandleFunc("GET /api/releases/current", a.secure(false, a.subscriberProtocol(a.currentRelease)))
+	mux.HandleFunc("GET /api/releases/{id}/archive", a.secure(false, a.subscriberProtocol(a.archive)))
+	mux.HandleFunc("POST /api/heartbeats", a.secure(false, a.subscriberProtocol(a.heartbeat)))
 	mux.HandleFunc("POST /api/hosts/{host}/resync", a.secure(true, a.requestResync))
 	mux.HandleFunc("GET /api/hosts", a.secure(true, a.listHosts))
 	mux.HandleFunc("POST /api/hosts/{host}/token", a.secure(true, a.issueToken))
@@ -83,6 +90,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		code, status = "forbidden", http.StatusForbidden
 	case errors.Is(err, errTooLarge):
 		code, status = "too_large", http.StatusRequestEntityTooLarge
+	case errors.Is(err, errIncompatibleProtocol):
+		code, status = "incompatible_protocol", http.StatusConflict
 	}
 	// The envelope is {error, detail, conflict_id?}. conflict_id is
 	// added ONLY when the error wraps a ConflictRecordedError — the
@@ -97,6 +106,24 @@ func writeErr(w http.ResponseWriter, err error) {
 		envelope["conflict_id"] = cre.ID
 	}
 	writeJSON(w, status, envelope)
+}
+
+// subscriberProtocol gates the three subscriber-facing routes after
+// authentication. An absent request header is legacy protocol v1 so an
+// upgraded server remains compatible with existing subscribers. A present
+// header must contain exactly one supported value; duplicate, empty, or
+// unsupported values fail before a manifest, archive, or heartbeat is
+// processed. Every gated response after authentication advertises v1.
+func (a *api) subscriberProtocol(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(subscriberProtocolHeader, subscriberProtocolVersion)
+		versions := r.Header.Values(subscriberProtocolHeader)
+		if len(versions) > 0 && (len(versions) != 1 || versions[0] != subscriberProtocolVersion) {
+			writeErr(w, errIncompatibleProtocol)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // decodeBody decodes a JSON request body, distinguishing the

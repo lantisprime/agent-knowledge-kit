@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,12 +91,44 @@ type fakeServer struct {
 	requireToken      string         // when non-empty, every handler 401s unless Authorization matches
 	hostQueries       []string       // ?host= values seen on /current, in arrival order ("" when absent)
 	authorizedHits    map[string]int // endpoint key ("current","archive","heartbeat") -> count of authorized requests
-	redirectOnCurrent bool           // when true, /current returns 302 to /sentinel (FIX 1 redirect-refusal test)
-	sentinelHits      int            // hits on /sentinel, used to assert the redirect is refused client-side
+	protocolResponses map[string]string
+	protocolRequests  map[string][]string
+	redirectOnCurrent bool // when true, /current returns 302 to /sentinel (FIX 1 redirect-refusal test)
+	sentinelHits      int  // hits on /sentinel, used to assert the redirect is refused client-side
 }
 
 func newFakeServer() *fakeServer {
-	return &fakeServer{archives: map[int64][]byte{}, archiveHits: map[int64]int{}, authorizedHits: map[string]int{}}
+	return &fakeServer{
+		archives:          map[int64][]byte{},
+		archiveHits:       map[int64]int{},
+		authorizedHits:    map[string]int{},
+		protocolResponses: map[string]string{},
+		protocolRequests:  map[string][]string{},
+	}
+}
+
+func (f *fakeServer) setProtocolResponse(endpoint, version string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.protocolResponses[endpoint] = version
+}
+
+func (f *fakeServer) recordProtocol(w http.ResponseWriter, r *http.Request, endpoint string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.protocolRequests[endpoint] = append(f.protocolRequests[endpoint],
+		r.Header.Values("Agent-Knowledge-Protocol-Version")...)
+	if version := f.protocolResponses[endpoint]; version != "" {
+		w.Header().Set("Agent-Knowledge-Protocol-Version", version)
+	}
+}
+
+func (f *fakeServer) protocolRequestsSeen(endpoint string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.protocolRequests[endpoint]))
+	copy(out, f.protocolRequests[endpoint])
+	return out
 }
 
 func (f *fakeServer) setRequireToken(tok string) {
@@ -171,6 +205,7 @@ func (f *fakeServer) heartbeatCount() int {
 func (f *fakeServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/releases/current", func(w http.ResponseWriter, r *http.Request) {
+		f.recordProtocol(w, r, "current")
 		if !f.authorize(r, "current") {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -190,6 +225,7 @@ func (f *fakeServer) handler() http.Handler {
 		json.NewEncoder(w).Encode(cur)
 	})
 	mux.HandleFunc("GET /api/releases/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
+		f.recordProtocol(w, r, "archive")
 		if !f.authorize(r, "archive") {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -211,6 +247,7 @@ func (f *fakeServer) handler() http.Handler {
 		w.Write(body)
 	})
 	mux.HandleFunc("POST /api/heartbeats", func(w http.ResponseWriter, r *http.Request) {
+		f.recordProtocol(w, r, "heartbeat")
 		if !f.authorize(r, "heartbeat") {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -417,6 +454,107 @@ func TestConvergeNewReleaseFlipsCorpus(t *testing.T) {
 	}
 	if hb := srv.lastHeartbeat(); !hb.OK || hb.ReleaseID != 2 || hb.ResyncApplied || hb.Error != nil {
 		t.Fatalf("release-2 heartbeat = %+v, want ok release_id=2", hb)
+	}
+}
+
+func TestConvergeRejectsIncompatibleCurrentProtocol(t *testing.T) {
+	home := t.TempDir()
+	docs1 := []testDoc{{"kernel/kernel.md", []byte("# Kernel\nrelease one\n")}}
+	hash1 := computeContentHash(docs1)
+	docs2 := []testDoc{{"kernel/kernel.md", []byte("# Kernel\nrelease two\n")}}
+	hash2 := computeContentHash(docs2)
+
+	srv := newFakeServer()
+	srv.setCurrent(currentRelease{ReleaseID: 1, ContentHash: hash1, Docs: docsToManifest(docs1)})
+	srv.setArchive(1, buildTar(docs1))
+	srv.setArchive(2, buildTar(docs2))
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	converge(ts.URL, home, "t1", "", testClient())
+	wantLink := corpusLink(t, home)
+	wantApplied, err := os.ReadFile(filepath.Join(home, ".applied"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv.setCurrent(currentRelease{ReleaseID: 2, ContentHash: hash2, Docs: docsToManifest(docs2)})
+	srv.setProtocolResponse("current", "2")
+	converge(ts.URL, home, "t1", "", testClient())
+
+	if link := corpusLink(t, home); link != wantLink {
+		t.Fatalf("corpus link after incompatible current protocol = %q, want unchanged %q", link, wantLink)
+	}
+	if got, err := os.ReadFile(filepath.Join(home, ".applied")); err != nil || !bytes.Equal(got, wantApplied) {
+		t.Fatalf(".applied after incompatible current protocol = %q, %v; want unchanged %q", got, err, wantApplied)
+	}
+	if hits := srv.archiveHitCount(2); hits != 0 {
+		t.Fatalf("release 2 archive hits = %d, want 0 when current protocol is incompatible", hits)
+	}
+	if got := srv.protocolRequestsSeen("current"); len(got) != 2 || got[0] != "1" || got[1] != "1" {
+		t.Fatalf("current protocol request headers = %v, want [1 1]", got)
+	}
+	hb := srv.lastHeartbeat()
+	if hb.OK || hb.Error == nil {
+		t.Fatalf("heartbeat after incompatible current protocol = %+v, want ok=false and error", hb)
+	}
+}
+
+func TestConvergeRejectsIncompatibleArchiveProtocol(t *testing.T) {
+	home := t.TempDir()
+	docs1 := []testDoc{{"kernel/kernel.md", []byte("# Kernel\nrelease one\n")}}
+	hash1 := computeContentHash(docs1)
+	docs2 := []testDoc{{"kernel/kernel.md", []byte("# Kernel\nrelease two\n")}}
+	hash2 := computeContentHash(docs2)
+
+	srv := newFakeServer()
+	srv.setCurrent(currentRelease{ReleaseID: 1, ContentHash: hash1, Docs: docsToManifest(docs1)})
+	srv.setArchive(1, buildTar(docs1))
+	srv.setArchive(2, buildTar(docs2))
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	converge(ts.URL, home, "t1", "", testClient())
+	wantLink := corpusLink(t, home)
+	srv.setCurrent(currentRelease{ReleaseID: 2, ContentHash: hash2, Docs: docsToManifest(docs2)})
+	srv.setProtocolResponse("archive", "2")
+	converge(ts.URL, home, "t1", "", testClient())
+
+	if link := corpusLink(t, home); link != wantLink {
+		t.Fatalf("corpus link after incompatible archive protocol = %q, want unchanged %q", link, wantLink)
+	}
+	if hits := srv.archiveHitCount(2); hits != 1 {
+		t.Fatalf("release 2 archive hits = %d, want 1 rejected response", hits)
+	}
+	if got := srv.protocolRequestsSeen("archive"); len(got) != 2 || got[0] != "1" || got[1] != "1" {
+		t.Fatalf("archive protocol request headers = %v, want [1 1]", got)
+	}
+	hb := srv.lastHeartbeat()
+	if hb.OK || hb.Error == nil {
+		t.Fatalf("heartbeat after incompatible archive protocol = %+v, want ok=false and error", hb)
+	}
+}
+
+func TestHeartbeatReportsIncompatibleProtocolResponse(t *testing.T) {
+	var requestVersions []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestVersions = append(requestVersions, r.Header.Values("Agent-Knowledge-Protocol-Version")...)
+		w.Header().Set("Agent-Knowledge-Protocol-Version", "2")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	var logs bytes.Buffer
+	previousWriter := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previousWriter)
+
+	heartbeat(testClient(), ts.URL, "t1", "", 1, true, "", false)
+	if len(requestVersions) != 1 || requestVersions[0] != "1" {
+		t.Fatalf("heartbeat protocol request headers = %v, want [1]", requestVersions)
+	}
+	if !strings.Contains(logs.String(), "incompatible protocol") {
+		t.Fatalf("heartbeat log = %q, want incompatible protocol error", logs.String())
 	}
 }
 

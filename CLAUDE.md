@@ -46,7 +46,10 @@ content hash, install a fresh version directory, atomically switch
 Subscribers fail soft: server, authentication, archive, hash, or filesystem
 failure retains the last-good corpus. The operator sees convergence through
 heartbeats and the fleet page. Force-resync erases the subscriber's applied
-belief and forces a fresh verified materialization.
+belief and forces a fresh verified materialization. Subscriber requests and
+server responses negotiate wire protocol v1; missing version headers are
+legacy v1 for rolling upgrades, while advertised incompatible versions fail
+before manifest or archive bytes can change the selected corpus.
 
 Adapters consume only files below `$KNOWLEDGE_HOME/corpus`:
 
@@ -104,16 +107,18 @@ for Codex adapter tests. Server and subscriber flags are documented by their
 
 `docs/plans/knowledge-server.md` is the accepted v1 contract. Steps 1–7 are
 implemented. The approved post-v1 document-link and release-lint slice is
-recorded in `docs/plans/document-link-lints.md`. `docs/architecture.md` is the
-current decision record.
+recorded in `docs/plans/document-link-lints.md`; subscriber wire compatibility
+is recorded in `docs/plans/subscriber-protocol-compatibility.md`.
+`docs/architecture.md` is the current decision record.
 `docs/plans/delivery-trust-boundary.md` is retained only as an explicitly
 superseded historical plan; do not implement or cite its two-principal model as
 current architecture.
 
 Remaining post-v1 work is not ordered: automated claim detection, additional
 collections/machine-submitted streams, additive lifecycle/provenance schema,
-SSE notification, and compatibility/authenticated binary releases require a
-newly approved slice. Multi-instance HA and Postgres are out of scope.
+SSE notification, broader document/database schema compatibility, and
+authenticated binary releases require a newly approved slice. Multi-instance
+HA and Postgres are out of scope.
 Environment deployment and consumer migration remain consumer-repository work.
 
 ## Conventions

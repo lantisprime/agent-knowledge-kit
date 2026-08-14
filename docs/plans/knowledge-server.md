@@ -9,7 +9,8 @@ thin subscriber with token-bound identity; authN; embedded curation
 UI; conflict records + merge view; fleet page + force-resync UI);
 the Git transport and two-principal fixture publisher are retired. The first
 approved post-v1 slice, immutable document links plus release lints, is defined
-in `document-link-lints.md`.
+in `document-link-lints.md`. The approved subscriber wire-compatibility slice
+is defined in `subscriber-protocol-compatibility.md`.
 
 ## Operator constraints (fixed)
 
@@ -345,6 +346,16 @@ generate the operator credential itself (`-init-operator-token`,
 CSPRNG, mode 0600); a minimum length is enforced for
 hand-supplied tokens but their entropy cannot be verified — use the
 generation path.
+
+The current-release, archive, and heartbeat routes negotiate subscriber wire
+protocol v1 with `Agent-Knowledge-Protocol-Version: 1` after authentication.
+A missing request or response header is legacy v1 for rolling upgrades. Empty,
+duplicate, or unsupported request versions return `409
+incompatible_protocol` before the route handler runs. The subscriber rejects
+any incompatible advertised response version before consuming a manifest or
+archive, retaining the last-good corpus and attempting an error heartbeat.
+The exact rolling-upgrade and failure contract is in
+`subscriber-protocol-compatibility.md`.
 
 **Content-hash construction** (pinned so an independent subscriber
 reproduces it bit-for-bit from the manifest alone). Doc order is the

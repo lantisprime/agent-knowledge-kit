@@ -465,6 +465,112 @@ func TestJSONResponsesCarryHardeningHeaders(t *testing.T) {
 	checkError(t, r) // 400
 }
 
+func TestSubscriberProtocolCompatibilityGate(t *testing.T) {
+	f := newAuthedFixture(t)
+	hostToken := f.issueToken(t, "protocol-host")
+	const header = "Agent-Knowledge-Protocol-Version"
+
+	do := func(t *testing.T, method, path, token string, body io.Reader, versions ...string) (*http.Response, []byte) {
+		t.Helper()
+		req, err := http.NewRequest(method, f.ts.URL+path, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		for _, version := range versions {
+			req.Header.Add(header, version)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp, responseBody
+	}
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   func() io.Reader
+	}{
+		{name: "current", method: http.MethodGet, path: "/api/releases/current"},
+		{name: "archive", method: http.MethodGet, path: "/api/releases/1/archive"},
+		{name: "heartbeat", method: http.MethodPost, path: "/api/heartbeats", body: func() io.Reader {
+			return strings.NewReader(`{"host":"","release_id":1,"ok":true}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := func() io.Reader { return nil }
+			if tc.body != nil {
+				body = tc.body
+			}
+			wantSuccess := http.StatusOK
+			if tc.name == "heartbeat" {
+				wantSuccess = http.StatusNoContent
+			}
+			for _, accepted := range []struct {
+				name     string
+				versions []string
+			}{
+				{name: "legacy missing header"},
+				{name: "v1", versions: []string{"1"}},
+			} {
+				t.Run(accepted.name, func(t *testing.T) {
+					resp, responseBody := do(t, tc.method, tc.path, hostToken, body(), accepted.versions...)
+					if resp.StatusCode != wantSuccess {
+						t.Fatalf("status=%d body=%s, want %d", resp.StatusCode, responseBody, wantSuccess)
+					}
+					if got := resp.Header.Values(header); len(got) != 1 || got[0] != "1" {
+						t.Fatalf("response protocol header = %v, want [1]", got)
+					}
+				})
+			}
+
+			for _, rejected := range []struct {
+				name     string
+				versions []string
+			}{
+				{name: "unsupported", versions: []string{"2"}},
+				{name: "empty", versions: []string{""}},
+				{name: "duplicate", versions: []string{"1", "1"}},
+			} {
+				t.Run(rejected.name, func(t *testing.T) {
+					resp, responseBody := do(t, tc.method, tc.path, hostToken, body(), rejected.versions...)
+					if resp.StatusCode != http.StatusConflict {
+						t.Fatalf("status=%d body=%s, want 409", resp.StatusCode, responseBody)
+					}
+					if !bytes.Contains(responseBody, []byte(`"error":"incompatible_protocol"`)) {
+						t.Fatalf("body=%s, want incompatible_protocol", responseBody)
+					}
+					if got := resp.Header.Values(header); len(got) != 1 || got[0] != "1" {
+						t.Fatalf("response protocol header = %v, want [1]", got)
+					}
+				})
+			}
+		})
+	}
+
+	// Authentication remains the outer gate: an incompatible request
+	// without a credential is still unauthorized, not a version oracle.
+	resp, _ := do(t, http.MethodGet, "/api/releases/current", "", nil, "2")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated incompatible request status=%d, want 401", resp.StatusCode)
+	}
+
+	// Operator/UI routes are not version-gated.
+	resp, body := do(t, http.MethodGet, "/api/docs", f.opsToken(), nil, "2")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("operator route status=%d body=%s, want 200", resp.StatusCode, body)
+	}
+}
+
 // jsonFor marshals v with json.Encoder so test assertions exercise
 // the SAME wire form (including the trailing newline) the server
 // sends. Store types have json tags; this is the round-trip-safe
